@@ -1,0 +1,7 @@
+@echo off
+PROMPT $p$g
+PATH C:\DOS;C:\WINDOWS;C:\DOSRMX;
+mkdir d:\temp
+SET TEMP=D:\TEMP
+cd \user\sim
+cfs_menu

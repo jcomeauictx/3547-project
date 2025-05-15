@@ -1,0 +1,475 @@
+;SLURP - pull images off the STP disk using a packet driver
+;Revisions: 
+;X01 6/29/95 first test
+;
+debug=1 ;set to zero when debugged
+timeout equ     90      ;minute and a half no packets, disconnect
+tmoval=(timeout*182)/10 ;approx number of ticks
+cr      equ     13
+lf      equ     10
+ff      equ     12
+so      equ     14
+s       equ     15
+esc     equ     27
+dos     equ     21h
+stderr  equ     2       ;standard error device
+#if debug
+mode    equ     6       ;promiscuous mode when debugging, recv all packets
+#else
+mode    equ     2       ;unicast packets only for release
+#endif
+net     equ     60h     ;assume loaded here
+;
+print   macro
+	info    'SLURP -- ',#1
+	#em
+;
+info    macro
+	call    txterr
+	jmp     short >m1
+	db      #1,#2,cr,lf
+m1:
+	#em
+;
+errchk  macro
+	call    #1
+	#em
+;
+dbgmsg  macro
+	#if debug1
+	print   #1
+	#endif
+	#em
+;
+	jmp     start   ;skip data area
+ohandle dw      0       ;storage for output handle
+ihandle dw      0       ;input handle (network)
+altdta  db      64 dup (?) ;alternate DTA area
+freqhd  dw      inbuffer,inbuffer,0 ;free space listhead
+rcvqhd  dw      rcvqhd,rcvqhd,0 ;packet reception listhead
+quiet   dw      0       ;2's comp of timer count at last packet received
+quitchrs db     0,3,26,27 ;function keys, ^C, ^Z, ESC will terminate
+quitlen = $-quitchrs ;length of string
+;
+start:  info    "Slurp - Pull IPSS images off the STP disk"
+	info    "Version X01, Copyright (C) 1995 USPS"
+	mov     bx,1000h ;number of paragraphs to keep
+	mov     ah,4ah  ;dos function to modify memory size
+	int     dos     ;assume OK
+	mov     dx,offset altdta ;make a safe DTA
+	mov     ah,1ah  ;SET DTA service
+	int     dos     ;assume OK
+	xor     ah,ah   ;service 0, get current clock count
+	int     1ah     ;from the BIOS
+;note - no need to worry about clearing the midnight bit, since DOS will
+;always see it first by processing the tick interrupt
+	neg     dx      ;only use low-order part
+	mov     quiet,dx ;store for checking later
+	call    openout ;open the output file and check for errors
+	errchk  >e1     ;abort on error
+	call    openin  ;set up for datagram transmission and reception
+	errchk  >e2     ;abort on error
+	call    connect ;begin the transfer session
+	errchk  >e3     ;abort on error
+	call    receive ;get all the data off the STP disk
+	errchk  >e4     ;on any error, just quit
+	call    release ;disconnect from network interrupts
+	mov     ax,4c00 ;otherwise exit with ERRORLEVEL 0
+	int     dos
+e1:     jnc     ret
+	mov     ax,4c01h ;errorlevel 1
+	int     dos     ;exit
+	ret     ;target for jump
+e2:     jnc     ret
+	mov     ax,4c02h ;errorlevel 2
+	int     dos     ;exit
+e3:     jnc     ret
+	call    release ;disconnect from network interrupts
+	mov     ax,4c03 ;errorlevel 3
+	int     dos     ;exit
+e4:     jnc     ret
+	call    release ;disconnect from network interrupts
+	mov     ax,4c04 ;errorlevel 4
+	int     dos
+;
+openout:
+	mov     si,offset >a1 ;point to filename
+	mov     cx,0    ;file attribute
+	mov     bx,4001h ;write with auto-commit enabled
+	mov     dx,1    ;if file exists, open
+	mov     ah,6ch  ;extended open service
+	int     dos     ;request service
+	errchk  >e1     ;check for errors
+	ret     ;return success
+a1:     db      '3547imgs.dat',0
+e1:     jc      >e2     ;quit on failure
+	mov     ohandle,ax ;save handle
+	mov     bx,ax   ;also into BX in case it worked
+	cmp     cx,1    ;was an existing file opened?
+	jne     ret     ;continue if not
+	xor     cx,cx   ;clear offset registers
+	mov     dx,cx   ;...
+	mov     ax,4202h ;move file pointer to EOF
+	int     dos     ;request service
+	jc      >e2     ;quit on error
+	print   'Info - Appending to existing file'
+	ret
+e2:     print   '*FATAL* - Failed to create output file'
+	pop     ax      ;don't continue
+	ret     ;to main routine
+;
+openin:
+	mov     ax,201h ;receive both DIX and IEEE 802.3 framed packets
+	mov     bx,-1   ;set up type descriptor
+	xor     cx,cx   ;length
+	mov     dl,cl   ;...
+	mov     si,cx   ;...
+	mov     di,offset handler ;set receive handler address
+	int     net     ;try to register it...
+	errchk  >e1     ;...
+	mov     ihandle,ax ;store handle if OK
+	mov     ah,20   ;according to BYTE May 1991 p.302
+	mov     bx,ihandle ;get our handle
+	mov     cx,mode ;set receive mode
+	int     net     ;make the call
+	errchk  >e2     ;check errors
+	ret     ;OK if we're here
+e1:     jnc     ret     ;resume if OK
+	print   '*FATAL* - Could not register receive handler'
+	pop     ax      ;toss return address
+	ret     ;let main routine abort
+e2:     jnc     ret
+	cmp     dl,1    ;bad handle?
+	jne     >e3     ;skip if not
+	print   '*FATAL* - Bad file handle for network device'
+	stc     ;re-set the error flag
+	ret
+e3:     cmp     dl,8    ;mad mode?
+	jne     >e4     ;skip if not
+	print   '*FATAL* - Cannot access network with specified mode'
+	stc     ;set error flag
+	ret
+e4:     print   '*FATAL* - Unknown access error to network'
+	stc     ;set error flag
+	ret
+;
+connect:
+	ret     ;do nothing for test run
+;
+receive:
+;the interrupt handler actually takes care of reception, here we store to
+;disk and keep the user posted on progress...
+r1:     call    tmochk  ;check for timeout
+	errchk  >e1     ;quit if so
+	call    testkbd ;check for user termination
+	errchk  >e3     ;quit if so
+	call    getpkt  ;fetch a packet from the queue
+	jz      r1      ;loop if nothing
+	dbgmsg  'Found a packet'
+	mov     cx,4[di] ;get length word
+	mov     dx,di   ;copy pointer
+	add     dx,6    ;skip past list entry and length
+	mov     bx,ohandle ;get output file handle
+	mov     ah,40h  ;write (auto-commit enabled)
+	int     dos     ;attempt to write...
+	errchk  >e2     ;abort on error
+	call    remque  ;remove the entry from packet queue
+	jmp     r1      ;loop back around
+e1:     jnc     ret     ;return if OK
+	print   'WARNING - Timeout exceeded - shutting down now'
+	pop     ax      ;return to main routine
+	ret
+e3:     jnc     ret     ;continue if no requested exit
+	pop     ax      ;else return to main routine with carry set
+	ret
+;
+testkbd:
+	mov     ax,0c06h ;clear keyboard buffer and get input, no echo
+	mov     dl,0ffh ;specify input
+	int     dos     ;do it now...
+	jz      ret     ;loop until timeout, error, or user termination
+	mov     di,offset quitchrs ;get list of possible termination chars
+	mov     cx,quitlen ;length of list
+	repnz   scasb   ;see if any match
+	errchk  >e1     ;return carry clear if not
+	print   'Info - Program terminated by user'
+	stc     ;mark as error so it will terminate
+	ret
+e1:     jz      ret     ;continue if a termination key was hit
+;this is only necessary because SCASB can leave C flag in unknown state        
+	or      ax,ax   ;else clear carry
+	pop     ax      ;don't continue
+	ret     ;to main program
+;
+release:
+	mov     ah,3    ;release type function
+	mov     bx,ihandle ;get handle
+	int     net     ;disconnect from network, deregister int handler
+	ret     ;if we fail, it will crash system anyway so why check?
+;
+handler:
+	or      ax,ax   ;incoming packet?
+	jne     >p1     ;yes, skip ahead
+	call    insque  ;make room if possible
+	retf    ;return with result in ES:DI
+p1:     retf    ;nothing yet
+;
+tmochk: xor     ax,ax   ;service zero to get time
+	int     1ah     ;from BIOS
+	add     dx,quiet ;add two's complement of start time to get zero...
+	cmp     dx,tmoval ;...plus time difference
+	cmc     ;complement before return...
+	ret     ;with carry set when timeout reached
+;Following are the queue management routines, based on code from the RSX
+;pool allocation/deallocation routines, the VAX queue instructions, and
+;other code I have seen somewhere...
+;Here is an idea of how it should work:
+;               Address         Contents        Description
+;The listhead:  0010            1000            Forward link (Flink)
+;               0012            1000            Backward link (Blink)
+;               0014            0000            Size of block (zero for hdr)
+;               ...
+;First Entry:   1000            0010            Flink
+;               1002            0010            Blink
+;               1004            8000            Size of block (when empty)
+;That was for the free space queue. The packets will be likewise linked:
+;RCVQHD:        0020            0020            Receive queue listhead
+;               0022            0020            Points to itself
+;               0024            0000            Marks listhead entry
+;As space is needed, it will be taken from the free space list and linked
+;into the packet queue:
+;Freqhd:        0010            1400            Linked now past packet length
+;               0012            1400
+;               0014            0000
+;               ...
+;Rcvqhd:        0020            1000            Flink to first packet
+;               0022            1000            Only one packet so far
+;               0024            0000            Marks queue header
+;               ...
+;               1000            0020            Links now to RCVQHD
+;               1002            0020            ...
+;               1004            0400            Size of this packet
+;               ...
+;               1400            0010            Links to FREQHD
+;               1402            0010            ...
+;               1404            7C00            8000h - 0400h
+;               
+insque: push    bx      ;save handle
+;called with null in AX, handle in BX, packet length in CX, from interrupt        
+;handler. Needs buffer address large enough to hold packet in ES:DI; if not
+;enough space available, return 0:0 in ES:DI.
+;Originally disabled interrupts here, then realized I didn't have to because        
+;this is called by an interrupt handler... since the REMQUE routine DOES have
+;interrupts disabled, there is no way this could ever be called while REMQUE
+;is in progress anyway...
+;7/1/95 Realized that, being called from an interrupt handler, will have DS        
+;pointing elsewhere... will have to save segment registers and restore
+;them afterwards
+	push    ax      ;save null
+	push    ds      ;save data segment register
+	push    cs      ;now make DS and ES same as CS
+	push    cs
+	pop     es
+	pop     ds
+	add     cx,6    ;make room for pointers in front of packet
+	mov     di,offset freqhd ;backward link
+i1:     mov     bx,[di] ;get next entry of freespace queue
+	or      4[bx],ax ;see if end of queue
+	errchk  >e1     ;check, and quit if so
+	cmp     cx,4[bx] ;check size of this packet
+	jbe     >i2     ;skip ahead if enough room
+	mov     di,bx   ;copy entry address
+	jmp     i1      ;loop
+;found room for the packet, so update both queues accordingly
+i2:     jz      >i4     ;special treatment if exactly equal to desired size
+	mov     ax,20   ;make sure at least 20 chars left over
+	add     cx,ax   ;...
+	cmp     cx,4[bx] ;still less, or equal?
+	ja      >i4     ;skip if not
+	sub     cx,20   ;restore count value
+	add     [di],cx ;update forward link of previous entry
+	mov     ax,4[bx] ;snag size of this block
+	mov     di,[bx] ;get forward link from here...
+	add     [di+2],cx ;update its backward link
+	mov     di,bx   ;now copy the pointer...
+	add     di,cx   ;make a new pointer
+	mov     ax,[bx] ;forward link remains the same
+	mov     [di],ax ;so copy it
+	mov     ax,[bx+2] ;backward link also
+	mov     [di+2],ax ;...
+	mov     ax,[bx+4] ;get size
+	mov     [di+4],ax ;copy it too
+	sub     [di+4],cx ;but adjust it
+;now place this same packet at the tail of the receive queue...        
+i3:     mov     di,rcvqhd+2 ;tail pointer
+	mov     rcvqhd+2,bx ;replace with new entry address
+	mov     [di],bx ;also point previous packet to it
+	mov     [bx+2],di ;point our back link to the previous tail
+	mov     word ptr [bx],offset rcvqhd ;and point forward link to header
+	mov     di,bx   ;return pointer to this entry
+	add     di,6    ;make sure to adjust for link words
+	mov     [di-2],cx ;store length in the entry
+	pop     ds      ;get real DS back
+	pop     ax      ;now restore registers
+	pop     bx
+	sub     cx,6    ;we added at beginning
+	ret
+i4:     sub     cx,ax   ;restore count value if altered
+;Move pointers so as to eliminate this chunk from the freespace queue.
+;Right now, BX contains the current pointer, and DI the forward pointer of
+;the previous entry...
+	mov     ax,[bx] ;get forward link from here
+	mov     [di],ax ;store in forward link of previous entry
+	mov     di,ax   ;also point DI to it
+	mov     ax,[bx+2] ;get backward link from here
+	mov     [di+2],ax ;store as backward link of next entry
+	jmp     i3      ;use common routine to finish up
+e1:     jnz     ret     ;continue if nonzero
+	pop     ax      ;else toss return address
+	pop     ds      ;restore data segment
+	pop     ax      ;get null back
+	mov     es,ax   ;set ES:DI null
+	mov     di,ax   ;...
+	pop     bx      ;restore handle
+	ret     ;to interrupt handler
+;
+;If any packets exist, return the pointer in DI; otherwise set Z flag
+getpkt: mov     di,rcvqhd ;get forward link from listhead
+	cmp     di,[di] ;if it points to itself, it's empty
+	ret
+;
+remque: mov     bx,[di+2] ;get the backward link
+;called with DI pointer to packet just used, now to be released
+	cli     ;don't allow queue manipulation to be interrupted
+	mov     si,[di] ;the forward link
+	mov     [bx],si ;point previous to following, bypassing this
+	mov     [si+2],bx ;point following to previous, bypassing this
+;that's it for the receive queue, now adjust the free space list
+;Now, of course we could just link it in, but what if it borders, either at        
+;the front or the back, of another free block? We should in that case connect
+;ourselves to that block, to avoid fragmentation...
+	mov     ax,[di+4] ;get our length...
+	add     ax,di   ;and add our address to get start of next block
+	mov     bx,freqhd ;get flink of free space list
+r1:     mov     dx,bx   ;copy into an unused register
+	add     dx,4[bx] ;add length of this chunk
+	cmp     dx,bx   ;was length zero (end of list)?
+	errchk  >e1     ;if so, just link it in wherever
+	cmp     ax,bx   ;does end of released chunk touch start of this one?
+	errchk  >e2     ;connect to it if so
+	cmp     dx,di   ;does end of accessed chunk touch start of ours?
+	errchk  >e3     ;connect to it if so
+	mov     bx,[bx] ;else link to next entry
+	jmp     r1      ;loop till entire queue is traversed
+;We could of course quit when any of the conditions is met, but that would
+;prevent restoring the whole free space if it were complete except for the
+;block just now being released... we would just connect at the head and
+;leave it broken at the tail border.
+e1:     jne     ret     ;return if not pointing to listhead
+	mov     si,[bx] ;else get existing flink at listhead...
+	mov     [di],si ;and store as flink of this entry
+	mov     [bx],di ;now store our address as the listhead flink
+	mov     [si+2],di ;also as the blink of next entry
+	pop     ax      ;don't continue
+	sti     ;reenable interrupts and return
+	ret
+e2:     jne     ret     ;return if not the same
+;here if end of the chunk we're releasing touches start of another entry
+	mov     ax,[bx+4] ;get its length
+	add     [di+4],ax ;add to our length
+	mov     ax,[bx+2] ;get its backward link
+	mov     [di+2],ax ;make it ours
+	mov     ax,[bx] ;same goes for forward link
+	mov     [di],ax ;...
+	ret     ;back to see if we can optimize again
+e3:     jne     ret     ;return if not the same
+;here if end of previous chunk is touching the start of this one
+	mov     ax,[di+4] ;get our length
+	add     [bx+4],ax ;add to the other block
+	ret     ;that's all that's necessary in this case
+;
+txterr:
+;if followed by a string, prints the string to STDERR; if followed
+; immediately by a null, uses string address in BX
+	pushf           ;save flags
+	push    ax      ;save registers we will be using
+	push    bx      ;...
+	push    cx      ;...
+	push    dx      ;...
+	push    di      ;to locate null
+	push    bp      ;pointer
+	mov     bp,sp   ;so we can use relative addressing
+	mov     di,[bp+14] ;address of text, after we...
+	add     di,2    ;point past the branch
+	mov     al,[di] ;let's see if it's null...
+	or      al,al   ;...
+	mov     dx,di   ;assume it's not
+	jne     >a2     ;skip if not
+	mov     dx,bx   ;else use address in BX
+	mov     di,dx   ;copy pointer to start of string
+	mov     cx,80   ;max string length
+	xor     al,al   ;look for null
+	repnz   scasb   ;loop till null is found
+	mov     cx,di   ;get original pointer
+	sub     cx,dx   ;subtract string start
+	dec     cx      ;don't print the null
+	jmp     short   >a3
+a2:     mov     bx,[bp+14] ;get the address of the branch instruction
+	mov     cl,byte ptr [bx+1] ;load the offset into count register
+	xor     ch,ch   ;clear the high byte
+a3:     ;skipped to here if address was in BX and we had to find end
+	mov     bx,stderr ;standard handle for error device (screen)
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	pop     bp      ;restore registers...
+	pop     di      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	pop     ax      ;...
+	popf            ;and flags
+	ret
+;
+numerr:
+	pushf
+	push    bx      ;save registers
+	push    cx      ;...
+	push    dx      ;...
+	push    si      ;...
+	push    di      ;...
+	push    bp      ;...
+	sub     sp,6    ;need 5 spaces for number-to-string conversion
+			;plus one extra space for leading zero
+	mov     bp,sp   ;for relative addressing
+	xor     si,si   ;for clearing registers
+	mov     di,5    ;pointer into digits
+	mov     cx,10   ;constant for division
+	mov     byte [bp+di],'0' ;init with ASCII zero
+	or      ax,ax   ;is number zero?
+	je      >a2     ;if so, skip computation
+a1:     mov     byte [bp+di],'0' ;init with ASCII zero
+	mov     dx,si   ;clear high word
+	div     cx      ;put remainder in DX
+	or      [bp+di],dl ;and merge with '0' to make ASCII number
+	dec     di      ;adjust the pointer
+	or      ax,ax   ;see if we're done
+	jne     a1      ;loop if not
+	inc     di      ;adjust upwards for last DEC
+a2:     mov     cx,6    ;max chars to send, plus 1
+	sub     cx,di   ;subtract pointer to get actual number
+	lea     dx,[bp+di] ;address of string
+	mov     bx,stderr ;standard handle for error device
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	add     sp,6    ;clear off the buffer we made at entry
+	pop     bp      ;...
+	pop     di      ;...
+	pop     si      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	popf    ;...
+	ret
+;
+inbuffer:
+	dw      freqhd,freqhd,8000h ;flink,blink,chunksize

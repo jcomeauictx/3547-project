@@ -1,0 +1,210 @@
+;EXTRACT.A86 - Trim a file down to a specified size
+dos     equ     21h
+esc     equ     1bh
+stdout  equ     1       ;standard output
+;
+errchk  macro
+        call    #1
+        #em
+;
+print   macro
+        call    >m1     ;skip text
+        db      'EXTRACT --',#1,13,10,'$'
+m1:     pop     dx      ;get pointer to text
+        mov     ah,9    ;write to STDOUT
+        int     dos     ;...
+        #em
+;
+        jmp     start
+argc    dw      0       ;storage for argument count
+argv    dw      8 dup (0) ;storage for args, 4 expected
+newstart dd     0       ;offset where we want the file to start
+newlength dd    0       ;desired length of output file
+ihandle dw      0       ;storage for input file handle
+ohandle dw      0       ;storage for output file handle
+count   dw      0       ;for keeping track of CRLFs
+crlf    db      13,10   ;carriage return/linefeed every 76 chars
+space   equ     ' '     ;space character
+hextbl  db      0,1,2,3,4,5,6,7,8,9,-1,-1,-1,-1,-1,-1
+        db      -1,10,11,12,13,14,15,-1,-2,-1,-1,-1,-1,-1,-1,-1
+        db      16 dup (-1)
+        db      -1,10,11,12,13,14,15,-1,-2,-1,-1,-1,-1,-1,-1,-1
+        db      16 dup (-1)
+radix10: dd     1,10,100,1000,10000,100000,1000000,10000000,100000000,-1
+radix16: dd     1,10h,100h,1000h,10000h,100000h,1000000h,10000000h,-1
+start:  mov     bx,80h  ;point to command line length
+        xor     cx,cx   ;clear the register
+        mov     cl,[bx] ;get the length
+        cmp     cx,8    ;must be at least 8 chars to be valid arg
+        errchk  >e1     ;quit if not
+        add     bx,cx   ;point to the end
+        inc     bx      ;now it does
+        mov     byte[bx],space ;replace CR with space
+        mov     dx,bx   ;copy the end pointer
+        xor     bx,bx   ;make pointer into ARGV array
+        mov     di,82h  ;point DI to start of command line
+l1:     mov     si,di   ;copy the pointer
+        mov     al,space ;search for space
+        repnz   scasb   ;look for the first space
+        sub     di,si   ;get the length
+        dec     di      ;...
+        mov     argv[bx],di ;store it
+        add     di,si   ;restore the value except for DEC
+        cmp     dx,di   ;past the end?
+        errchk  >e1     ;error if so
+        mov     byte [di],0 ;null-terminate the string
+        inc     di      ;now back where we were
+        add     bx,2    ;update the pointer
+        mov     argv[bx],si ;save pointer to start of this arg
+        add     bx,2    ;update the pointer again
+        inc     argc    ;update the arg count
+        cmp     argc,4  ;done?
+        jne     l1      ;loop back if not
+;now try to open the input and output files        
+        mov     dx,argv+2 ;get pointer to first arg
+        mov     ax,3d00h ;find matching entry
+        int     dos     ;try...
+        errchk  >e3     ;quit on error
+        mov     ihandle,ax ;save the handle if OK
+        mov     dx,argv+14 ;point to 4th arg, the output filespec
+        mov     ah,3ch  ;create the file, overwriting if it exists
+        xor     cx,cx   ;no attributes
+        int     dos     ;do it...
+        errchk  >e3     ;quit on error
+        mov     ohandle,ax ;save the handle
+;both files opened OK, try and read the offsets specified
+        mov     ax,offset newstart
+        mov     bx,word argv+6 ;get pointer to 2nd arg
+        add     bx,word argv+4 ;add length
+        dec     bx      ;less one points to final char
+        call    atoi    ;convert to binary
+        mov     ax,offset newlength
+        mov     bx,word argv+10 ;get pointer to 3rd arg
+        add     bx,word argv+8 ;add length
+        dec     bx      ;less one points to final char
+        call    atoi    ;convert to binary
+;all args parsed, now position file pointer where user wants it
+        mov     ax,4200h ;move file pointer relative to start of file        
+        mov     dx,word newstart ;get low word of offset
+        mov     cx,word newstart+2 ;high word of offset
+        mov     bx,ihandle ;get input handle
+        int     dos     ;try it
+        errchk  >e4     ;quit on failure
+        mov     cx,word newlength ;get new length
+        mov     ax, word newlength+2 ;make sure it's within bounds
+        or      ax,ax   ;checking...
+        errchk  >e5     ;quit if anything in high word
+        mov     ah,3fh  ;service requested
+        mov     dx,offset buffer ;point to empty space
+        int     dos     ;perform the read
+        errchk  >e6     ;quit on error
+        mov     cx,ax   ;don't quibble about size, use what we got
+        mov     ah,40h  ;set up for write
+        mov     bx,ohandle ;get output file handle
+        int     dos     ;do it...
+        errchk  >e7     ;quit on error
+        mov     ax,4c00 ;else exit normally
+        int     dos
+e1:     jc      help    ;quit on bad command line
+        ret     ;else return
+help:   print   'Usage: EXTRACT infile.ext start length outfile.ext'
+        print   'Specify start and length as decimal (12345)'
+        print   'Or hex (c000h). Maximum length is 65535 (ffffh).'
+        mov     ax,4c16h ;set errorlevel
+        int     dos
+e3:     jnc     ret     ;return if opened OK
+        print   'Failed on FILE OPEN'
+        mov     ax,4c15h ;set errorlevel
+        int     dos
+        ret     ;target for j?? ret
+e4:     jnc     ret     ;return if OK
+        print   'Failed to move the read pointer'
+        mov     ax,4c14h ;set errorlevel
+        int     dos
+        ret     ;target for j?? ret
+e5:     jz      ret     ;return if high word empty
+        print   'Sorry, this can only extract 65,535 bytes maximum'
+        mov     ax,4c13h ;set errorlevel
+        int     dos     ;quit
+        ret
+e6:     jnc     ret     ;return if OK
+        print   'Failed to read from input file'
+        mov     ax,4c12h ;set errorlevel
+        int     dos     ;quit
+        ret     ;target for j?? ret
+e7:     jnc     ret     ;return if no write error
+        print   'Failed to write out the data'
+        mov     ax,4c10h ;set errorlevel
+        int     dos
+atoi:   push    ax      ;address of doubleword result
+        xor     ax,ax   ;now clear it
+        std     ;move backwards
+        mov     si,bx   ;store address of final char of numeric string
+        mov     di,offset radix16 ;assume hex until proven otherwise
+        mov     bx,offset hextbl ;get translation table
+        lodsb   ;get a byte and update pointer
+        sub     al,'0'  ;reduce ASCII digit to binary
+        errchk  >e2     ;error if control character
+        xlat    ;make sure hex digit is converted to binary
+        cmp     al,-2   ;was it an "h"?
+        errchk  >e3     ;go sort it out
+        jz      >a2     ;if so, process as hex
+;otherwise process as decimal
+        mov     di,offset radix10 ;point to table of base 10 values
+        jmp     short >a2 ;skip the digit-processing this first time
+a1:     lodsb   ;get a byte and update the pointer
+        or      al,al   ;zero marks done
+        errchk  >e1     ;check...
+        sub     al,'0'  ;if we returned, binarize it
+        mov     bx,offset hextbl ;get translation table address
+        xlat    ;translate any hex digits to binary
+        or      al,al   ;see if invalid (will not catch hex digit if decimal)
+        errchk  >e5     ;test, return if OK
+a2:     or      al,al   ;see if anything left to do
+        jl      a1      ;loop if 'h' specifier
+        jnz     >a3     ;continue if nonzero
+        add     di,4    ;else advance to next doubleword in table
+        jmp     short a1 ;loop back around
+a3:     pop     bx      ;get pointer to result doubleword
+        push    bx      ;save it on the stack again
+        mov     dx,word [di] ;get low word of current value
+        add     [bx],dx ;update the result
+        adc     word [bx+2],0 ;catch any carry
+        mov     dx,[di+2] ;get high word of current value
+        add     [bx+2],dx ;update the result
+        errchk  >e4     ;carry is an error here
+        dec     al      ;if we returned, loop around...
+        jmp     short a2 ;...
+e1:     ;test for done (null byte)
+        jne     ret     ;return if not
+        pop     ax      ;otherwise clean up the stack
+        pop     ax      ;...
+        cld     ;set direction flag back to normal
+        ret     ;then return
+e2:     ;test for control character
+        jnc     ret     ;return if not
+        cld     ;direction back to normal
+        print   'Invalid character in numeric argument'
+        mov     ax,4c01 ;specify errorlevel
+        int     dos     ;exit
+e3:     ;test for 'h' indicating hexadecimal; h=-2, invalid=-1
+        jbe     ret     ;if 'h', Z was set. If zero or positive, C was set.
+        cld     ;direction back to normal
+        print   'Must specify number as decimal, or hex with trailing "h"'
+        mov     ax,4c02 ;specify errorlevel
+        int     dos     ;exit
+        ret
+e4:     ;carry set here means the number was too damn large
+        jnc     ret     ;return if OK
+        cld     ;direction back to normal
+        print   'Numeric argument out of range'
+        mov     ax,4c03 ;specify errorlevel
+        int     dos
+e5:     ;sign flag set here if invalid
+        jns     ret     ;return if OK
+        cld     ;direction back to normal
+        print   'Non-numeric character in offset specification'
+        mov     ax,4c04 ;specify errorlevel
+        int     dos     ;exit
+        ret     ;target for j?? ret
+buffer: end

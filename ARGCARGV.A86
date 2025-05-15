@@ -1,0 +1,46 @@
+;ARGCARGV - subroutine to parse command line
+argmax  equ     4       ;set to maximum # args supported
+minlen  equ     8       ;set to minimum possible valid commandline length
+argc    dw      0       ;storage for argument count
+argv    dw      (argmax*2) dup (0) ;storage for args, 2 words per
+space   equ     ' '     ;space character
+parse:  mov     bx,80h  ;point to command line length
+        xor     cx,cx   ;clear the register
+        mov     cl,[bx] ;get the length
+        cmp     cx,minlen ;must be at least 8 chars to be valid arg
+        errchk  >e1     ;quit if not
+        add     bx,cx   ;point to the end
+        inc     bx      ;now it does
+        mov     byte[bx],space ;replace CR with space
+        mov     dx,bx   ;copy the end pointer
+        xor     bx,bx   ;make pointer into ARGV array
+        mov     di,82h  ;point DI to start of command line
+l1:     mov     si,di   ;copy the pointer
+        mov     al,space ;search for space
+        repnz   scasb   ;look for the first space
+        sub     di,si   ;get the length
+        dec     di      ;...
+        mov     argv[bx],di ;store it
+        add     di,si   ;restore the value except for DEC
+        cmp     dx,di   ;past the end?
+        errchk  >e1     ;error if so
+        mov     byte [di],0 ;null-terminate the string
+        inc     di      ;now back where we were
+        add     bx,2    ;update the pointer
+        mov     argv[bx],si ;save pointer to start of this arg
+        add     bx,2    ;update the pointer again
+        inc     argc    ;update the arg count
+        cmp     argc,4  ;done?
+        jne     l1      ;loop back if not
+;now try to open the input and output files        
+        mov     dx,argv+2 ;get pointer to first arg
+        mov     ax,3d00h ;find matching entry
+        int     dos     ;try...
+        errchk  >e3     ;quit on error
+        mov     ihandle,ax ;save the handle if OK
+        mov     dx,argv+14 ;point to 4th arg, the output filespec
+        mov     ah,3ch  ;create the file, overwriting if it exists
+        xor     cx,cx   ;no attributes
+        int     dos     ;do it...
+        errchk  >e3     ;quit on error
+        mov     ohandle,ax ;save the handle

@@ -1,0 +1,180 @@
+;fsm$mon captures all data which the FSM normally sends to the line printer
+;and buffers it to disk. It will extract report data into separate files
+;and allow custom reports to be created from that data.
+;The printer data can be passed through in real time to the printer, or it
+;can be buffered to save paper.
+;A later option will allow review of buffered data while the program is
+;running.
+;Serial data from the PDP's printer port will be captured using BIOS
+;interrupts and buffered into a fixed-length file, FSMLOG.TXT.
+;This file will buffer 4096 lines at 256 bytes per line for a total of 1
+;megabyte of disk space.
+;
+stdin   equ     0
+stdout  equ     1
+stderr  equ     2
+errchk  macro
+        j#1     >m2     ;if condition set, jump to message routine
+        ret     ;else return
+m1:     db      #2
+        mov     dx,offset m1
+        mov     cx,#s2  ;size of string
+        mov     bx,stderr ;file handle of standard error device
+        mov     ax,40h  ;DOS write function
+        int     dos     ;not going to check for errors here...
+
+openlog:
+;first open the log file and find most recent record.
+        jmp     >i2     ;skip past file name
+i1:     db      'c:\fsmlog.txt'
+i2:     mov     dx,offset i1 ;point to file name
+        mov     ax,3d00 ;only read access is necessary
+        int     dos     ;open the file
+        errchk  c,nonfatal,'Log file doesn't exist - Creating',newlog
+        mov     bx,ax   ;store file handle if OK
+        mov     cx,128  ;record size
+        sub     sp,cx   ;make record buffer
+        mov     dx,sp   ;point to dynamic buffer
+        mov     si,4096 ;number of records in file
+i3:     int     dos     ;get a record
+        errchk  c,nonfatal,'Error reading log file - Recreating',newlog
+        inc     [dx]    ;FF FF if current record
+        jz      >i4     ;skip if we found it
+;not checking possibility of 2 or more records marked "current" - if this
+; turns out to be a problem, we will have to add such a check.
+        dec     si      ;else dec count
+        errchk  z,nonfatal,'Log file corrupted - Reinitializing',initlog
+        jmp     i3      ;loop if not zero
+i4:     mov     current,4096 ;store current record number...
+        sub     current,si ;as zero-based integer
+;now we must continue initialization - capturing interrupts etc.
+init:
+;before capturing the interrupts, we have to capture the critical error
+;handler, to be able to restore the original ISV.
+        call    change_interrupts
+        call    get_global_flags ;fetch DOS critical error & section flags
+initlog:
+;initialize log file - record format:
+;flag byte - 0ffh = not current record
+;            0    = current record
+;unused byte 0ffh
+;date field longword (for restoring corrupted log file)
+;time field longword
+;114 unused bytes
+;record text, 132 bytes - CR and LF not written - FF has its own (blank) rec
+;
+createlog:
+;only used if file not found
+;
+;data area
+;place at end of program
+        even    ;align on word boundary for faster access
+;
+critical_section_flag dw 0,0 ;these are DOS global locations
+critical_error_flag dw 0,0
+;
+;don't insert anything between the next 4 lines!
+;
+old_int_23 dw 0,0 ;break handler
+old_int_24 dw 0,0 ;critical error handler
+old_int_25 dw 0,0 ;absolute disk read vector
+old_int_26 dw 0,0 ;absolute disk write vector
+;
+old_int_13 dw 0,0 ;disk I/O vector
+;
+change_interrupts:
+        mov     ds,0    ;point to Interrupt Vector Table (IVT)
+        mov     di,old_int_23 ;point to storage area
+        mov     si,23h*4 ;and specifically to 4-byte entry for INT23
+        mov     cx,8    ;move the 8 words for 4 ivecs
+        mov     ax,offset newint23 ;point first 2 ints to simple IRET
+        mov     bx,cs
+        cli             ;can't allow interrupts here!
+        rep     movsw
+        stosw           ;now store the new interrupt vectors
+        xchg    ax,bx
+        stosw
+        xchg    ax,bx
+        stosw
+        xchg    ax,bx
+        stosw           ;done with termination/error ints
+;now we have to capture the disk I/O vectors
+        mov     ax,offset newint25
+        mov     bx,cs
+        stosw
+        xchg    ax,bx
+        stosw
+        xchg    ax,bx
+        mov     ax,offset newint26
+        stosw
+        xchg    ax,bx
+        stosw
+        sti     ;reenable interrupts for now while we set up another
+        mov     di,old_int_13 ;point to storage area
+        mov     si,13h*4 ;and specifically to 4-byte entry for INT13
+        mov     cx,2    ;move the two words for the ivec
+        mov     ax,offset newint13 ;point these ints to simple IRET
+        mov     bx,cs
+        cli             ;can't allow interrupts here!
+        rep     movsw
+        stosw           ;now store the new interrupt vector
+        xchg    ax,bx
+        stosw
+        sti     ;reenable interrupts
+        push    cs
+        pop     ds      ;restore data segment
+        ret
+newint23:
+newint24:
+        iret    ;do nothing
+newint13:
+        inc     busyflag ;hang a "do not disturb" sign on the disk drive
+        pushf           ;simulate an interrupt
+        call    old_int_13
+        pushf           ;we need these flags returned by BIOS
+        dec     busyflag
+        popf
+        ret     2       ;toss flags as we return
+newint25:
+        inc     busyflag
+        call    old_int_25
+        jmp     int26_exit ;use same exit routine as int26
+newint26:
+        inc     busyflag
+        call    old_int_26
+int26_exit:
+        pushf   ;save flags as BIOS left 'em
+        dec     busyflag
+        popf
+        ret
+;
+get_global_flags:
+        mov     ah,30h  ;now's good a time as any to check DOS version
+        int     dos
+        jc      ret
+        cmp     al,3    ;at least version 3?
+        jc      ret     ;return with carry if not
+        mov     ah,34   ;else get location of global flags
+        int     dos     ;specifically, this get critical section flag
+        jc      ret     ;quit if error
+        dec     bx      ;in versions 3.3 - 5 at least, error flag is prior
+        mov     critical_error_flag,bx
+        mov     critical_error_flag+2,es
+        push    cs
+        pop     es      ;restore ES
+        clc     ;indicate no error
+        ret
+dos_safe_check:
+        inc     busyflag
+        jg      >d1     ;not safe if not zero or less
+        push    ds,si,ax ;save regs we'll be using
+        lds     si,dword ptr critical_error_flag
+        lodsb   ;get critical error flag
+        or      al,[si] ;OR with critical section flag
+        pop     ax,si,ds ;restore regs
+        jnz     >d1     ;not safe if either is nonzero
+        clc     ;else mark it safe
+        ret
+d1:     sec     ;mark not safe
+        ret
+;

@@ -1,0 +1,512 @@
+;IMSDSM.A - Transputer software image disassembler
+dos     equ     21h
+;
+        setop   macro   ;set opcode in output line
+;specify opcode as a string or as a register which points to a string
+        push    cx      ;save count register in any case
+        push    si      ;save source and dest regs
+        ##if !#s1-2     ;if register
+        mov     cl,dl   ;get length of string
+        xor     ch,ch   ;clear high byte
+        mov     si,#1   ;get register
+        mov     di,offset outline+8 ;destination
+        rep     movsb   ;store the mnemonic
+        ##else
+        mov     cl,#s1-2 ;get length of string
+        xor     ch,ch   ;clear high byte
+        mov     si,offset >m1 ;point to where we'll store the string
+        mov     di,offset outline+8 ;destination
+        rep     movsb   ;store in output line
+        jmp     >m2
+m1:     db      #1
+m2:     ;end of string
+        ##endif
+        pop     si      ;restore registers, leave DI where it points
+        pop     cx
+        #em
+;
+        posit   macro   ;position to field in output string
+        cmp     di,offset outline+#1 ;already there?
+        jb      >m1     ;if not, use specified offset
+        inc     di      ;else point up one space from current loc
+        jmp     >m2
+m1:     mov     di,offset outline+#1 ;use offset provided
+m2:     ;end of macro
+        #em
+;
+        sethex  macro   ;translate CX:DX into Hexadecimal
+        ##if !#s1       ;if no parameter specified
+        mov     di,offset outline+16 ;point to arg field
+        ##else
+        cmp     di,offset outline+#1 ;see if DI already there
+        jb      >m1     ;if not, use specified offset
+        inc     di      ;else point up one space from current loc
+        jmp     >m2
+m1:     mov     di,offset outline+#1 ;use offset provided
+m2:
+        ##endif
+        call    sethexr
+        #em
+;
+        setdec  macro   ;set arg in CX:DX to decimal
+        call    setdecr
+        #em
+;
+        opcode  macro   ;build opcode table
+        dw      #2      ;first the value
+        db      #s1-2   ;then count byte of chars in mnemonic string
+        db      #1      ;then the string itself
+        #em
+;
+        putline macro   ;send line to output file
+        call    putliner
+        #em
+;
+        nextbyte macro
+        call    nextbyter
+        #em
+;
+        hexoutb macro   ;output byte as hexadecimal
+        push    ax
+        mov     al,byte #1  ;get it
+        call    hexout_byte
+        pop     ax
+        #em
+;
+        hexoutw macro   ;output word as hexadecimal
+        push    ax
+        mov     ax,word #1   ;get arg
+        push    ax
+        xchg    ah,al   ;put high byte first
+        call    hexout_byte
+        pop     ax
+        call    hexout_byte
+        pop     ax
+        #em
+;
+        putchar macro   ;output char at current DI pointer
+        push    ax
+        mov     al,#1
+        stosb
+        pop     ax
+        #em
+;
+disasm:
+        xor     cx,cx   ;clean out storage registers
+        mov     dx,cx
+i9:     nextbyte        ;get next byte
+        jc      >i1     ;quit if no more
+        aam     10h     ;split into nybbles
+        mov     bl,ah   ;get function code
+        shl     bx,1    ;make word offset
+        shl     cx,1    ;now shift CX:DX up a nybble
+        rcl     dx,1
+        shl     cx,1
+        rcl     dx,1
+        shl     cx,1
+        rcl     dx,1
+        shl     cx,1
+        rcl     dx,1
+        add     cl,al   ;store low nybble of input byte
+        call    ftable[bx] ;and go to its routine
+        jmp     i9      ;loop back until done
+i1:     mov     ax,4c00h ;exit
+        int     dos
+ftable:
+        dw      ims_j,ims_ldlp,ims_pfix,ims_ldnl
+        dw      ims_ldc,ims_ldnlp,ims_nfix,ims_ldl
+        dw      ims_adc,ims_call,ims_cj,ims_ajw
+        dw      ims_eqc,ims_stl,ims_stnl,ims_opr
+ims_j:
+        mov     ax,cx   ;get low word of jump destination
+        or      ax,dx   ;see if it's 0
+        je      >i1     ;if so, special routine
+        setop   'j'     ;otherwise mnemonic is 'j'
+        sethex          ;convert arg to hex (AX:DX)
+        putline         ;and send line to output
+        ret             ;return
+i1:     setop   'jump 0  ;used for debugging'
+        putline         ;send to output
+        ret
+ims_ldlp:
+        setop   'ldlp'  ;set mnemonic for "load local pointer"
+        setdec          ;translate arg to signed decimal
+        putline         ;send to output
+        ret
+ims_pfix:
+        ret             ;do nothing for "prefix"
+ims_ldnl:
+        setop   'ldnl'  ;"load non-local"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_ldc:
+        setop   'ldc'   ;"load constant"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_ldnlp:
+        setop   'ldnlp' ;"load non-local pointer"
+        sethex          ;hexadecimal
+        putline         ;send to output
+        ret
+ims_nfix:
+        or      dx,dx   ;see if number is already negative
+        jl      >i1     ;continue if so
+        mov     dx,0ffffh ;else start off with -1
+        or      cx,0fff0h ;...
+i1:     mov     al,cl   ;get low byte of arg word
+        not     al      ;get ones' complement
+        and     al,0fh  ;and clear high nybble
+        and     cl,0f0h  ;clear low nybble of CL
+        or      cl,al   ;and merge complemented nybble
+        ret
+ims_ldl:
+        setop   'ldl'   ;"load local"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_adc:
+        setop   'adc'   ;"add constant"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_call:
+        setop   'call'  ;"call"
+        sethex          ;hexadecimal
+        putline         ;send to output
+        ret
+ims_cj:
+        setop   'cj'    ;"conditional jump"
+        sethex          ;hex for address
+        putline         ;send to output
+        ret
+ims_ajw:
+        setop   'ajw'   ;"adjust workspace"
+        sethex          ;hexadecimal
+        putline         ;send to output
+        ret
+ims_eqc:
+        setop   'eqc'   ;"equals constant"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_stl:
+        setop   'stl'   ;"store local"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_stnl:
+        setop   'stnl'  ;"store non-local"
+        setdec          ;signed decimal
+        putline         ;send to output
+        ret
+ims_opr:
+;this instruction effects all the "opcodes", so it's handled differently
+        mov     bx,offset optable ;start at beginning of opcode table
+i1:     mov     ax,[bx] ;get opcode at current table address
+        add     bx,2    ;point past opcode word
+        or      ax,ax   ;see if end of table
+        jge     >i8     ;continue if non-negative, or...
+        jmp     >i3     ;skip ahead if so
+i8:     mov     dl,[bx] ;get length byte
+        inc     bx      ;and point to first char of mnemonic
+        cmp     ax,cx   ;see if this opcode is the one from program
+        jne     >i2     ;skip if not
+        setop   bx      ;else load mnemonic into output line
+        putline         ;and send to output
+        ret             ;return to main routine
+i2:     xor     dh,dh   ;clear high byte of length word
+        add     bx,dx   ;point past mnemonic
+        jmp     i1      ;and loop around
+i3:     setop   'data'  ;treat it as data if not valid opcode
+        sethex          ;show as hexadecimal
+        putline         ;send to output
+        ret
+;
+sethexr: 
+        push    ax
+        push    cx
+        mov     al,dh
+        call    >s1     ;convert nybbles to hex
+        mov     al,dl   ;ditto on down the line
+        call    >s1
+        mov     al,ch
+        call    >s1
+        mov     al,cl
+        call    >s1
+        mov     al,'h'  ;mark it as hex
+        stosb   ;...
+        pop     cx      ;restore registers
+        pop     ax
+        ret
+s1:     aam     10h     ;split nybbles
+        add     ax,3030h ;make both into digits
+        cmp     ah,3ah  ;or is it A-F?
+        jl      >s2     ;skip if so
+        add     ah,27h  ;else make it lowercase letter
+s2:     cmp     al,3ah  ;perform same check on AL
+        jl      >s3
+        add     al,27h
+s3:     xchg    al,ah   ;swap bytes
+        stosw   ;store the word
+        ret
+;
+hexout_byte:    ;output byte in AL as hexadecimal string at current DI
+                ; update DI as we go
+        push    ax
+        aam     10h     ;split nybbles
+        add     ax,3030h ;make both into digits
+        cmp     ah,3ah  ;or is it A-F?
+        jl      >s2     ;skip if so
+        add     ah,27h  ;else make it lowercase letter
+s2:     cmp     al,3ah  ;perform same check on AL
+        jl      >s3
+        add     al,27h
+s3:     xchg    al,ah   ;swap bytes
+        stosw   ;store the word
+        pop     ax
+        ret
+;
+setdecr:
+        push    ax      ;save registers
+        push    bx
+        mov     di,outline+16 ;point DI to arg output field
+        test    dx      ;see if DX is negative
+        jge     >s2     ;skip ahead if not
+        not     dx      ;else get two's complement of doubleword
+        not     cx
+        sub     cx,1
+        sbb     dx,0    ;...that does it
+        mov     al,'-'  ;show as negative
+        stosb   ;...
+s2:     mov     bx,offset dectable ;point to table of decimal numbers
+        xor     ah,ah   ;clear to indicate "no output yet"
+s9:     mov     al,'0'  ;start AL off with ASCII 0
+s3:     cmp     dx,[bx+2] ;compare high word to what's in the table
+        ja      >s4     ;skip low word compare if already higher
+        jb      >s5     ;skip also if less
+        cmp     cx,[bx] ;else compare low word
+        jae     >s4     ;go and subtract if higher or equal 
+s5:     test     ah      ;have we already started output?
+        jne     >s6     ;skip if so, output this
+        cmp     al,'0'  ;have something worth showing?
+        jg      >s6     ;go show it
+        jmp     >s7     ;any other case, skip it
+s4:     sub     cx,[bx] ;longword subtract
+        sbb     dx,[bx+2]
+        inc     al      ;inc decimal digit in AL
+        jmp     s3      ;loop back around
+s6:     stosb   ;send byte to output
+        mov     ah,al   ;show that we've output something
+s7:     add     bx,4    ;point to following number        
+        test    word [bx]    ;end of table?
+        jne     s9      ;loop if not
+        test    ah      ;have we output anything yet?
+        if z    stosb    ;store a zero if not
+        pop     bx      ;restore registers
+        pop     ax
+        ret
+dectable:
+        dd      10000000000 ;10 billion on down
+        dd      1000000000
+        dd      100000000
+        dd      10000000
+        dd      1000000
+        dd      100000
+        dd      10000
+        dd      1000
+        dd      100
+        dd      10
+        dd      1
+        dd      0
+;
+putliner:
+;modified to show instruction pointer as comment
+        posit   30      ;place in comment field
+        putchar ';'     ;mark as comment
+        hexoutw [last_ims_ip] ;output IP as hexadecimal word
+        mov     dx,offset outline
+        mov     ah,40h  ;dos WRITE function
+        mov     al,13   ;store CRLF at end of current line
+        stosb
+        mov     al,10
+        stosb
+        mov     cx,di   ;point to end of current line
+        sub     cx,offset outline ;subtract address of line start
+        mov     bx,1    ;handle of STDOUT, redirectable from command line
+        int     dos     ;call DOS for service
+        mov     di,offset outline ;now clean the line for next go-round
+        mov     cx,79
+        mov     si,offset freshline
+        rep     movsb
+        xor     cx,cx   ;clear CX:DX for next go-round
+        mov     dx,cx
+        mov     ax,word [ims_ip] ;make current IP "last" IP
+        mov     word [last_ims_ip],ax
+        mov     ax,word [ims_ip+2]
+        mov     word [last_ims_ip+2],ax
+        ret
+;
+nextbyter:
+        push    cx      ;save some registers
+        push    dx
+        push    bx
+        xor     bx,bx   ;point to STDIN
+        push    ax      ;just to make room on stack
+        mov     ah,3fh  ;dos READ function
+        mov     cx,1    ;just get one byte
+        mov     dx,sp   ;location of byte "buffer"
+        int     dos
+        jc      >i2     ;quit if error
+        or      ax,ax   ;see if we got anything
+        jnz     >i1     ;skip if so
+        stc     ;else set carry
+        jmp     >i2     ;and return
+i1:     add     word [ims_ip],1 ;inc doubleword instruction pointer
+        adc     word [ims_ip+2],0 ;...
+i2:     pop     ax      ;get byte just read
+        pop     bx      ;restore registers
+        pop     dx
+        pop     cx
+        ret
+;
+ims_ip: dd      0       ;IMS instruction pointer, updated each fetch
+last_ims_ip: 
+        dd      0       ;pointer to current instruction
+;
+freshline:
+        db      "                                        "
+        db      "                                     ",13,10
+outline:
+        db      "                                        "
+        db      "                                     ",13,10
+optable:
+;arithmetic/logical opcodes
+        opcode  'and',46h ;logical AND
+        opcode  'or',4bh ;logical OR
+        opcode  'xor',33h ;exclusive OR
+        opcode  'not',32h ;bitwise NOT
+        opcode  'shl',41h ;shift left
+        opcode  'shr',40h ;shift right
+        opcode  'add',5 ;add
+        opcode  'sub',0ch ;subtract
+        opcode  'mul',53h ;multiply
+        opcode  'fmul',72h ;fractional multiply
+        opcode  'div',2ch ;divide
+        opcode  'rem',1fh ;remainder
+        opcode  'gt',9  ;greater than
+        opcode  'diff',4 ;difference
+        opcode  'sum',52h ;sum
+        opcode  'prod',8 ;product for register A
+;long arithmetic opcodes
+        opcode  'ladd',16h ;long add
+        opcode  'lsub',38h ;long subtract
+        opcode  'lsum',37h ;long sum
+        opcode  'ldiff',4fh ;long difference
+        opcode  'lmul',31h ;long multiply
+        opcode  'ldiv',1ah ;long divide
+        opcode  'lshl',36h ;long shift left
+        opcode  'lshr',35h ;long shift right
+        opcode  'norm',19h ;normalize
+;general opcodes
+        opcode  'rev',0 ;reverse
+        opcode  'xword',3ah ;extend to word
+        opcode  'cword',56h ;check word
+        opcode  'xdble',1dh ;extend to doubleword
+        opcode  'csngl',4ch ;check single
+        opcode  'mint',42h ;minimum integer
+        opcode  'dup',5ah ;duplicate top of stack
+        opcode  'pop',79h ;pop processor stack
+;floating point support opcodes
+        opcode  'cflerr',73h ;check floating point error
+        opcode  'fptesterr',9ch ;load value true (FPU not present)
+        opcode  'unpacksn',63h ;unpack single length fp number
+        opcode  'roundsn',6dh ;round single length fp number
+        opcode  'postnormsn',6ch ;post-normalize correction of
+                 ;single-length fp number
+        opcode  'ldinf',71h ;load single length infinity
+;block move opcodes
+        opcode  'move2dinit',5bh ;initialize data for 2d block move
+        opcode  'move2dall',5ch ;2d block copy
+        opcode  'move2dnonzero',5dh ;2d block copy non-zero bytes
+        opcode  'move2dzero',5eh ;2d block copy zero bytes
+;CRC and bit opcodes
+        opcode  'crcword',74h ;calculate CRC on word
+        opcode  'crcbyte',75h ;calculate CRC on byte
+        opcode  'bitcnt',76h ;count bits set in word
+        opcode  'bitrevword',77h ;reverse bits in word
+        opcode  'bitrevnbits',78h ;reverse bottom n bits in word
+;indexing/array opcodes
+        opcode  'bsub',2 ;byte subscript
+        opcode  'wsub',0ah ;word subscript
+        opcode  'wsubdb',81h ;form double word subscript
+        opcode  'bcnt',34h ;byte count
+        opcode  'wcnt',3fh ;word count
+        opcode  'lb',1  ;load byte
+        opcode  'sb',3bh ;store byte
+        opcode  'move',4ah ;move message
+;timer handling opcodes
+        opcode  'ldtimer',22h ;load timer
+        opcode  'tin',2bh ;timer input
+        opcode  'talt',4eh ;timer alt start
+        opcode  'taltwt',51h ;timer alt wait
+        opcode  'enbt',47h ;enable timer
+        opcode  'dist',2eh ;disable timer
+;input/output opcodes
+        opcode  'in',7  ;input message
+        opcode  'out',0bh ;output message
+        opcode  'outword',0fh ;output word
+        opcode  'outbyte',0eh ;output byte
+        opcode  'alt',43h ;alt start
+        opcode  'altwt',44h ;alt wait
+        opcode  'altend',45h ;alt end
+        opcode  'enbs',49h ;enable skip
+        opcode  'diss',30h ;disable skip
+        opcode  'resetch',12h ;reset channel
+        opcode  'enbc',48h ;enable channel
+        opcode  'disc',2fh ;disable channel
+;control opcodes
+        opcode  'ret',20h ;return
+        opcode  'ldpi',1bh ;load pointer to instruction
+        opcode  'gajw',3ch ;general adjust workspace
+        opcode  'gcall',6 ;general call
+        opcode  'lend',21h ;loop end
+;scheduling opcodes
+        opcode  'startp',0dh ;start process
+        opcode  'endp',3 ;end process
+        opcode  'runp',39h ;run process
+        opcode  'stopp',15h ;stop process
+        opcode  'ldpri',1eh ;load current priority
+;error handling opcodes
+        opcode  'csub0',13h ;check subscript from 0
+        opcode  'ccnt1',4dh ;check count from 1
+        opcode  'testerr',29h ;test error false and clear
+        opcode  'seterr',10h ;set error
+        opcode  'stoperr',55h ;stop on error
+        opcode  'clrhalterr',57h ;clear halt-on-error
+        opcode  'sethalterr',58h ;set halt-on-error
+        opcode  'testhalterr',59h ;test halt-on-error
+;processor initialization opcodes
+        opcode  'testpranal',2ah ;test processor analyzing
+        opcode  'saveh',3eh ;save high priority queue registers
+        opcode  'savel',3dh ;save low priority queue registers
+        opcode  'sthf',18h ;store high priority front pointer
+        opcode  'sthb',50h ;store high priority back pointer
+        opcode  'stlf',1ch ;store low priority front pointer
+        opcode  'stlb',17h ;store low priority back pointer
+        opcode  'sttimer',54h ;store timer
+        opcode  'lddevid',17ch ;load device identity
+        opcode  'ldmemstartval',7eh ;load value of memstart address
+;debugger support codes
+        opcode  'break',0b1h ;break
+        opcode  'clrj0break',0b2h ;clear jump 0 break enable flag
+        opcode  'setj0break',0b3h ;set jump 0 break enable flag
+        opcode  'testj0break',0b4h ;test jump 0 break enable flag set
+        opcode  'timerdisableh',7ah ;disable high priority timer interrupt
+        opcode  'timerdisablel',7bh ;disable low priority timer interrupt
+        opcode  'timerenableh',7ch ;enable high priority timer interrupt
+        opcode  'timerenablel',7dh ;enable low priority timer interrupt
+;end of opcode table
+;       dw      -1
+

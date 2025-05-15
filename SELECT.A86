@@ -1,0 +1,45 @@
+;SELECT.A - Wait for keyhit. Return A-Z or a-z as 1-26 in ERRORLEVEL.
+;Returns 27 if out-of-bounds.
+;Remember to check ERRORLEVEL for highest desired value first. - 4/10/93 JLC
+dos     equ     21h
+;
+	xor     bx,bx   ;set STDOUT as device
+	mov     dx,82h  ;point to input line
+	mov     cx,bx   ;clear count...
+	mov     cl,[80h] ;get byte value from PSP
+	or      cl,cl   ;was anything there?
+	jz      noprompt ;skip ahead if not
+	dec     cl      ;else skip first space after command
+	mov     ah,40h  ;tell DOS to WRITE
+	int     dos
+noprompt:
+	mov     ah,7    ;get keyhit, trap ^C
+	int     dos     ;call DOS
+	or      al,al   ;special key?
+	jnz     aztest    ;skip if not
+	mov     ah,0bh  ;see if anything else in buffer
+	int     dos     ;(the case if special key was hit)
+	inc     al      ;returned FF if char waiting...
+	jnz     badkey  ;jump if not, it's out-of-bounds anyway
+	mov     ah,7    ;restore function for silent input
+	int     dos     ;and get it
+	jmp     badkey  ;no special keys allowed anyway
+aztest:
+	cmp     al,'A'  ;less than capital 'A'?
+	jc      badkey  ;quit if so
+	cmp     al,'Z'+1  ;less than or equal to Z?
+	jc      finish  ;then make offset from one and return
+	cmp     al,'a'  ;less than lowercase 'a'?
+	jc      badkey  ;same old stuff
+	cmp     al,'z'+1
+	jnc     badkey
+	sub     al,32   ;upcase it
+finish:
+	sub     al,'A'-1 ;one-base the return value
+	jmp     quit    ;return with it in ERRORLEVEL
+badkey:   
+	mov     al,27   ;return 27 for out-of-bounds key
+quit:
+	mov     ah,4ch  ;return to DOS
+	int     dos     ;it's all over.
+

@@ -1,0 +1,139 @@
+;RAMFILES.A86 - nibbleize or undo an Intermec user file
+dos     equ     21h
+esc     equ     1bh
+stdout  equ     1       ;standard output
+errchk  macro
+        call    #1
+        #em
+;
+        jmp     start
+handle  dw      0       ;storage for input file handle
+count   dw      0       ;for keeping track of CRLFs
+crlf    db      13,10   ;carriage return/linefeed every 76 chars
+usresc  db      esc,'p;' ;for nibbleized file
+        db      esc,'P;' ;for normal RAM format
+hextbl  db      '0123456789ABCDEF'
+unhtbl  db      0,1,2,3,4,5,6,7,8,9,0,0,0,0,0,0,0,0a,0b,0c,0d,0e,0f
+start:  mov     bx,80h  ;point to command line length
+        xor     ax,ax   ;clear the register
+        mov     al,[bx] ;get the length
+        add     bx,ax   ;point to the end
+        inc     bx      ;now it does
+        mov     byte [bx],ah ;store a zero there
+        mov     dx,82h  ;point DX to the ASCIZ name
+        mov     ah,4eh  ;find matching entry
+        int     dos     ;try...
+        errchk  >e1     ;quit on error
+        mov     ax,3d00h ;open the file for read
+        mov     dx,80h+30 ;point to ASCIZ returned by FINDFILE
+        int     dos     ;try it
+        errchk  >e1     ;see if OK
+        mov     handle,ax ;save the handle if so
+        mov     bx,handle ;retrieve the handle
+        mov     cx,word 80h+26 ;get file size from DTA
+        mov     ah,3fh  ;service requested
+        mov     dx,offset buffer ;point to empty space
+        int     dos     ;perform the read
+        errchk  >e1     ;check for failure
+        cmp     ax,cx   ;right amount?
+        errchk  >e2     ;quit if not
+        mov     di,word usresc
+        cmp     word buffer,di  ;is this nibbleized?
+        je      unnibb  ;undo it if so
+        mov     di,word usresc+3
+        cmp     word buffer,di  ;RAM format?
+        errchk  >e2     ;error if not
+;otherwise we nibbleize it
+        mov     dx,offset usresc ;send <ESC>p;
+        call    sendesc ;write it
+        mov     count,2 ;2 non-escape chars written so far
+        mov     si,offset buffer+3 ;point to start of data to be modified
+l1:     cmp     word [si],di  ;end of data?
+        call    >a1     ;finish up if so
+        lodsb   ;else get a byte
+        aam     16      ;split into nibbles
+        mov     bx,offset hextbl ;point BX to translation table
+        xlat    ;hexify low byte
+        xchg    ah,al   ;swap
+        xlat    ;hexify high byte, leave in low position to be written first
+        push    ax      ;place it on stack
+        mov     dx,sp   ;mark location
+        mov     cx,2    ;number of bytes
+        mov     ah,40h  ;dos service
+        mov     bx,stdout ;handle to use
+        int     dos     ;do it
+        pop     ax      ;clean up the stack
+        add     count,2 ;update the count
+        mov     ax,76   ;done one line?
+        cmp     count,ax ;checking...
+        jne     l1      ;loop if not
+        call    sendnl  ;else send the newline sequence
+        mov     count,0 ;reinit count variable
+        jmp     l1      ;loop back
+a1:     jne     ret     ;return if not done
+        mov     dx,offset usresc ;point to escape sequence
+        call    sendesc ;send it
+        mov     ah,3eh  ;dos CLOSE service
+        mov     bx,stdout ;handle
+        int     dos
+        mov     ax,4c00 ;exit no error
+        int     dos     ;end
+e1:     jnc     ret
+        mov     ax,4c01 ;quit on error
+        int     dos
+        ret
+e2:     je      ret     ;OK if same
+        mov     ax,4c02 ;else quit
+        int     dos
+unnibb: mov     dx,offset usresc+3 ;point to escseq with capital P
+        call    sendesc ;send it
+        mov     si,offset buffer+3 ;point to start of data to be modified
+        mov     di,word usresc ;load escseq into DI register
+l1:     cmp     word [si],di  ;end of data?
+        call    >a1     ;finish up if so
+        lodsb   ;else get a byte, the ASCII of high nibble
+        sub     al,'0'  ;zero-base it
+        jc      l1      ;skip it if it was an escape character
+        mov     bx,offset unhtbl ;point BX to translation table
+        xlat    ;hexify high byte
+        mov     ch,al   ;swap to high position
+        lodsb   ;get next byte
+        sub     al,'0'  ;do it again
+        xlat    ;unhex
+        mov     ah,ch   ;get high nybble back
+        aad     16      ;merge the nibbles
+        push    ax      ;place it on stack
+        mov     dx,sp   ;mark location
+        mov     cx,1    ;number of bytes
+        mov     ah,40h  ;dos service
+        mov     bx,stdout ;handle to use
+        int     dos     ;do it
+        pop     ax      ;clean up the stack
+        jmp     l1      ;loop back
+a1:     jne     ret     ;return if not the end
+        mov     dx,offset usresc+3 ;point to escape sequence
+        call    sendesc ;send it
+        mov     ah,3eh  ;dos CLOSE service
+        mov     bx,stdout ;handle
+        int     dos
+        mov     ax,4c00 ;exit no error
+        int     dos     ;end
+e1:     jnc     ret
+        mov     ax,4c01 ;quit on error
+        int     dos
+        ret
+e2:     je      ret     ;OK if same
+        mov     ax,4c02 ;else quit
+        int     dos
+sendesc: mov     cx,3    ;bytes to write
+        mov     bx,stdout ;to output, normally redirected
+        mov     ah,40h  ;dos service
+        int     dos     ;do it
+        ret     ;return, no error check
+sendnl: mov     cx,2    ;bytes to write for newline
+        mov     dx,offset crlf ;point to carriage return/line feed
+        mov     bx,stdout ;to output, normally redirected
+        mov     ah,40h  ;dos service
+        int     dos     ;do it
+        ret     ;return, no error check
+buffer: end

@@ -1,0 +1,10 @@
+        call    temp
+        jmp     short >a1
+        db      "this is a test$"
+a1:     ret     ;to operating system
+temp:   pop     dx      ;get address of string
+        push    dx      ;but re-save return address
+        add     dx,2    ;skip JMP SHORT
+        mov     ah,9    ;DOS function
+        int     21h     ;do it
+        ret     ;now return

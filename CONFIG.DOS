@@ -1,0 +1,10 @@
+device=c:\dos\himem.sys
+dos=high,umb
+device=c:\dos\emm386.exe 
+device=c:\dos\ramdrive.sys 4096 512 1024 /e
+rem DEVICE=C:\DOS\SETVER.EXE
+SHELL=C:\DOS\COMMAND.COM C:\DOS\  /p
+LASTDRIVE=D
+BUFFERS=48
+FILES=100
+rem device=c:\backpack\bphddrv.sys

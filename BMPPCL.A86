@@ -1,0 +1,491 @@
+;BMPPCL.A86 - Quick hack to convert 2-color BMP files to PCL images
+;Most of the code stolen from FORM3547.A86, this is to generate the Postal
+; eagle logo for that program using Mike Maxton's BMP files from NDSS-BBS
+;Copyright (C) 1995 John Comeau
+;Contact the author for bug reports and suggestions at:
+;jcomeau@world.std.com (email)
+;1900 W. Oakland Park Blvd., Ft. Lauderdale, FL 33310-9998
+;
+debug=1 ;set to zero when debugged
+debug1=1 ;for first-wave debugging
+cr      equ     13
+lf      equ     10
+ff      equ     12
+so      equ     14
+s       equ     15
+esc     equ     27
+dos     equ     21h
+black   equ     2       ;for word offset into table
+white   equ     0       ;black xor black
+stderr  equ     2       ;error device
+#if debug
+stdprn  equ     1       ;screen for debugging
+#else
+stdprn  equ     4       ;printer handle
+#endif
+;
+print   macro
+	call    txterr
+	db      'BMPPCL -- ',#1,cr,lf,0
+	#em
+;
+errchk  macro
+	call    #1
+	#em
+;
+dbgmsg  macro
+	#if debug2
+	print   #1
+	#endif
+	#em
+;
+prntxt  macro
+;send specified text to PRN: device
+	call    txtprn   ;embed the text here in the code
+	db      #1,#2,#3,#4,#5,#6,#7,#8,#9,0
+	#em
+;
+prnnum  macro
+;send specified number in decimal ASCII to PRN: device
+	push    ax      ;save current AX contents
+	mov     ax,#1   ;load up the number
+	call    numprn  ;do the conversion
+	pop     ax      ;restore AX
+	#em
+;
+stkvar  macro
+ttt=ttt-2
+#1=ttt
+	#em
+;
+begin   macro
+ttt=0
+	enter (#1*2),0
+	#em
+;
+	jmp     start
+wildcards: db   "*.BMP",0
+fileptr dw      0       ;for use with DOS findfile services    
+handle  dw      0       ;input file handle returned by DOS
+filesize dw     0       ;size of file returned in DTR
+width   dw      0       ;image width from header in bytes
+xwidth  dw      0       ;extended width, including padding to longword
+maxwid  equ     300     ;bytes for 2400 pixels
+pwidth  dw      0       ;width in pixels
+mask    dw      0       ;bitmask to chop unneeded bits from end byte
+pheight dw      0       ;height in pixels
+color   dw      0       ;color of current pel in decode line
+codsiz  dw      0       ;length of code currently using in table
+codlen  dw      0       ;length of code extracted from input file
+thiscode dw     0       ;code currently extracted
+byteptr dw      0       ;pointer into input file
+inbyte  dw      0       ;last byte from input file
+bits    dw      0       ;number of bits left in input byte
+linesdone dw    0       ;lines completed from current image
+image   dw      0       ;image being worked on, 0 to 3 (per page)
+thisbyte dw     0       ;current byte in decode line
+thisbit dw      80h     ;current bit in decode line
+thisline dw     offset lin1bf ;pointer to decode line
+refline dw      offset lin1bf ;pointer to reference line
+lin1bf  db      maxwid dup 0 ;300*8=2400 pixels
+	db      01010101xb ;to force a match at end
+lin2bf  db      maxwid dup 0 ;same size
+	db      01010101xb ;to force a match at end
+bufadr  dw      offset buffer
+start:  dbgmsg  'Debug - Starting'
+	jmp     near    >a1
+a0:     mov     ah,3eh  ;file close function
+	mov     bx,handle ;get file handle
+	int     dos     ;close the file
+a1:     call    nextfile ;locate next file and open it
+	jc      >a9     ;exit if done
+	call    skiphdr ;skip BMP header info, getting what we need out of it
+	errchk  >e2
+	call    convert ;perform the conversion
+	errchk  >e4     ;check for errors or done
+	jmp     a2
+a9:     print   'Info - Completed file processing'
+	mov     ax,4c00h ;no errors
+	int     dos     ;exit to DOS
+e2:     jnc     ret     ;return if no carry
+	print   'Error - Does not appear to be BMP image'
+	pop     ax      ;don't return
+	jmp     a0      ;get another file
+	ret
+e4:     ja      ret     ;return if not EOF nor error
+	pop     ax      ;don't return
+	call    imagedone ;clean up and prepare for next
+	jmp     near a0 ;get another file
+e5:     jnc     ret     ;return if no error
+;
+skiphdr:
+	mov     pheight,word [buffer+22] ;get width and height
+	mov     pwidth,word [buffer+18]
+	mov     bx,62  ;skip first 62 bytes
+	mov     byteptr,bx ;update the pointer
+	sub     filesize,bx ;...and size word, set carry if borrow
+;       prntxt  esc,'%-12345X',esc,'E'
+;       prntxt  esc,'*t300R' ;300 DPI
+	prntxt  esc,'*v1n1O' ;select opaque for source image & pattern
+	prntxt  esc,'*r1A' ;start at current X position
+	mov     xwidth,0 ;clear variables
+	mov     width,0 ;...
+	mov     ax,pwidth
+	mov     cl,5    ;bits to shift
+	ror     ax,cl   ;put shifted-out bits into high end
+	mov     bx,0f800h ;see if anything went into high 5 bits
+	test    ax,bx   ;perform logical AND
+	jz      >s1     ;skip if not
+	mov     xwidth,4 ;else round up to nearest 4 bytes
+	test    ax,3800h ;see if it was at least byte-aligned
+	jz      >s1     ;skip if so
+	mov     width,1 ;else adjust
+s1:     not     bx      ;now let's clear those bits
+	and     ax,bx   ;...
+	shl     ax,1    ;now shift count to bytes
+	shl     ax,1    ;...
+	add     xwidth,ax ;store it
+	add     width,ax ;here too
+	mov     ax,pwidth ;get pixel width again
+	mov     bx,8    ;divide by 8...
+	mov     dx,0    ;first clear high word
+	div     bx      ;perform the divide
+	mov     cl,dl   ;get the remainder
+	xor     ax,ax   ;clear the register
+	or      cl,cl   ;see if nothing
+	jz      >s2     ;skip if so
+	mov     al,1    ;shift a bit over that many times
+	shl     al,cl   ;...
+s2:     dec     al      ;make a bitmask
+	mov     byte mask,al ;store it for use later
+	ret
+;
+convert:
+	prntxt  esc,'*b' ;start raster graphics
+	prnnum  width   ;send width in bytes as decimal ASCII
+	prntxt  'W'     ;finish the sequence
+	mov     cx,width ;get the width
+	mov     si,byteptr ;pointer...
+	add     si,offset buffer
+	add     si,cx   ;to end of this line
+	dec     si      ;...
+	mov     di,offset lin1bf ;pointer to temp buffer
+	mov     bx,offset xtable ;translation table in BX
+c1:     mov     al,[si] ;get the next byte from EOL working backwards
+	xlat    ;using translation table, invert and complement the bits
+	stosb   ;store the translated byte
+	dec     si      ;update the pointer
+	loop    c1      ;loop till done
+	mov     di,offset lin1bf ;point to first byte again
+	mov     al,byte ptr mask ;get the mask byte
+	and     byte ptr [di],al ;mask garbage off first byte
+	mov     dx,offset lin1bf ;set up registers for WRITE
+	mov     ah,40h  ;...
+	mov     bx,stdprn ;...
+	mov     cx,width ;...
+	int     dos     ;do it...
+	jc      ret     ;quit on error
+	dec     pheight ;see if done
+	jz      ret     ;return if so
+	mov     dx,byteptr ;get pointer again
+	add     dx,xwidth ;update the pointer...
+	mov     byteptr,dx ;...
+	jmp     convert ;do another line
+	ret
+;
+xtable:
+;translation table to reverse AND invert bits
+	db      11111111xb,01111111xb,10111111xb,00111111xb,11011111xb
+	db      01011111xb,10011111xb,00011111xb,11101111xb,01101111xb
+	db      10101111xb,00101111xb,11001111xb,01001111xb,10001111xb
+	db      00001111xb,11110111xb,01110111xb,10110111xb,00110111xb
+	db      11010111xb,01010111xb,10010111xb,00010111xb,11100111xb
+	db      01100111xb,10100111xb,00100111xb,11000111xb,01000111xb
+	db      10000111xb,00000111xb,11111011xb,01111011xb,10111011xb
+	db      00111011xb,11011011xb,01011011xb,10011011xb,00011011xb
+	db      11101011xb,01101011xb,10101011xb,00101011xb,11001011xb
+	db      01001011xb,10001011xb,00001011xb,11110011xb,01110011xb
+	db      10110011xb,00110011xb,11010011xb,01010011xb,10010011xb
+	db      00010011xb,11100011xb,01100011xb,10100011xb,00100011xb
+	db      11000011xb,01000011xb,10000011xb,00000011xb,11111101xb
+	db      01111101xb,10111101xb,00111101xb,11011101xb,01011101xb
+	db      10011101xb,00011101xb,11101101xb,01101101xb,10101101xb
+	db      00101101xb,11001101xb,01001101xb,10001101xb,00001101xb
+	db      11110101xb,01110101xb,10110101xb,00110101xb,11010101xb
+	db      01010101xb,10010101xb,00010101xb,11100101xb,01100101xb
+	db      10100101xb,00100101xb,11000101xb,01000101xb,10000101xb
+	db      00000101xb,11111001xb,01111001xb,10111001xb,00111001xb
+	db      11011001xb,01011001xb,10011001xb,00011001xb,11101001xb
+	db      01101001xb,10101001xb,00101001xb,11001001xb,01001001xb
+	db      10001001xb,00001001xb,11110001xb,01110001xb,10110001xb
+	db      00110001xb,11010001xb,01010001xb,10010001xb,00010001xb
+	db      11100001xb,01100001xb,10100001xb,00100001xb,11000001xb
+	db      01000001xb,10000001xb,00000001xb
+	db      11111110xb,01111110xb,10111110xb,00111110xb,11011110xb
+	db      01011110xb,10011110xb,00011110xb,11101110xb,01101110xb
+	db      10101110xb,00101110xb,11001110xb,01001110xb,10001110xb
+	db      00001110xb,11110110xb,01110110xb,10110110xb,00110110xb
+	db      11010110xb,01010110xb,10010110xb,00010110xb,11100110xb
+	db      01100110xb,10100110xb,00100110xb,11000110xb,01000110xb
+	db      10000110xb,00000110xb,11111010xb,01111010xb,10111010xb
+	db      00111010xb,11011010xb,01011010xb,10011010xb,00011010xb
+	db      11101010xb,01101010xb,10101010xb,00101010xb,11001010xb
+	db      01001010xb,10001010xb,00001010xb,11110010xb,01110010xb
+	db      10110010xb,00110010xb,11010010xb,01010010xb,10010010xb
+	db      00010010xb,11100010xb,01100010xb,10100010xb,00100010xb
+	db      11000010xb,01000010xb,10000010xb,00000010xb,11111100xb
+	db      01111100xb,10111100xb,00111100xb,11011100xb,01011100xb
+	db      10011100xb,00011100xb,11101100xb,01101100xb,10101100xb
+	db      00101100xb,11001100xb,01001100xb,10001100xb,00001100xb
+	db      11110100xb,01110100xb,10110100xb,00110100xb,11010100xb
+	db      01010100xb,10010100xb,00010100xb,11100100xb,01100100xb
+	db      10100100xb,00100100xb,11000100xb,01000100xb,10000100xb
+	db      00000100xb,11111000xb,01111000xb,10111000xb,00111000xb
+	db      11011000xb,01011000xb,10011000xb,00011000xb,11101000xb
+	db      01101000xb,10101000xb,00101000xb,11001000xb,01001000xb
+	db      10001000xb,00001000xb,11110000xb,01110000xb,10110000xb
+	db      00110000xb,11010000xb,01010000xb,10010000xb,00010000xb
+	db      11100000xb,01100000xb,10100000xb,00100000xb,11000000xb
+	db      01000000xb,10000000xb,00000000xb
+;
+imagedone:
+	prntxt  esc,'*rC' ;end of raster graphics
+	xor     ax,ax   ;for clearing registers
+	mov     linesdone,ax ;...
+	mov     color,ax ;always white to start
+	mov     thisbyte,ax ;clear byte pointer
+	mov     thisbit,80h ;reinit bit pointer
+	mov     bits,0  ;bit counter
+	mov     bx,offset lin1bf ;clear line buffers
+	call    clearline ;...
+	mov     bx,offset lin2bf ;...
+	call    clearline ;...
+;       prntxt  ff      ;issue a formfeed
+;send the escape sequences to reinitialize the printer...
+	prntxt  esc,'*v0n1O' ;select transparent for source image & pattern
+;       prntxt  esc,'E',esc,'%-12345X' ;
+	mov     image,0 ;and clear the count
+	ret
+;
+clearline:
+;clear 300-byte buffer pointed to by BX
+	mov     di,bx   ;so we can use fast instructions
+	mov     cx,150  ;words are faster too
+	xor     ax,ax   ;store zeroes
+	repz    stosw   ;do it...
+	ret
+;
+getbyte:
+;load up a new byte from input
+	push    bx
+	mov     bx,byteptr ;get pointer address
+	mov     bl,buffer[bx]  ;get byte at that address
+	mov     byte inbyte,bl ;load up the byte
+	inc     byteptr ;update the pointer
+	mov     bx,1    ;'cause DEC doesn't set carry
+	sub     filesize,bx ;...
+	pop     bx
+	ret
+;
+nextfile:
+	mov     ah,4fh  ;assume DTA already initialized
+	xor     dx,dx   ;for test
+	or      dx,fileptr ;is a pointer defined?
+	jne     >l1     ;continue if so
+	mov     dx,offset wildcards ;else use *.*
+	mov     ah,4eh
+l1:     mov     fileptr,dx ;make sure to use correct function next time
+	int     dos     ;load DTA with file info
+	jc      ret     ;return if no more files
+	mov     ah,2fh  ;get DTA address
+	int     dos     ;into BX
+	add     bx,30   ;point to filename string
+	call    showfile ;let user know which file we're working on
+	mov     dx,bx   ;move to appropriate register for call
+	mov     ax,3d00h ;open for read
+	int     dos     ;call DOS
+	jc      ret     ;quit on error
+	sub     bx,4    ;point to file size
+	mov     handle,ax ;save the handle
+	mov     cx,[bx] ;get size from DTA
+	mov     filesize,cx ;store it for later
+	mov     dx,offset buffer ;point to buffer
+	mov     bx,handle ;get the handle
+	mov     ah,3fh  ;use READ function
+	int     dos     ;do it...
+	ret
+;
+txtprn:
+;if followed by an ASCIZ string, prints the string to STDPRN; if followed
+; immediately by a null, uses string address in BX
+	pushf           ;save flags
+	push    ax      ;save registers we will be using
+	push    bx      ;...
+	push    cx      ;...
+	push    dx      ;...
+	push    di      ;to locate null
+	push    bp      ;pointer
+	mov     bp,sp   ;so we can use relative addressing
+	mov     di,[bp+14] ;address of text
+	xor     ax,ax   ;clear to indicate null follows call
+	or      ax,[di] ;let's see if it's null
+	jne     >a1     ;skip if not
+	xchg    bx,di   ;else use address in BX
+	add     bx,2    ;and point past null word to return address
+a1:     mov     dx,di   ;copy into text pointer
+	xchg    al,ah   ;in case string was only 1 byte, move it into msb's
+	mov     cx,80   ;max string length we will allow
+	xor     al,al   ;looking for null
+	repnz   scasb   ;loop till we find the null
+	mov     cx,di   ;get the pointer
+	sub     cx,dx   ;subtract the start of the string
+	dec     cx      ;don't print the null
+	or      ax,ax   ;see if we are using string following call
+	jne     >a2     ;skip if so
+	mov     di,bx   ;else get return address from BX
+a2:     mov     [bp+14],di ;update the return address
+	mov     bx,stdprn ;standard handle for printer
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	pop     bp      ;restore registers...
+	pop     di      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	pop     ax      ;...
+	popf            ;and flags
+	ret
+;
+txterr:
+;if followed by an ASCIZ string, prints the string to STDERR; if followed
+; immediately by a null, uses string address in BX
+	pushf           ;save flags
+	push    ax      ;save registers we will be using
+	push    bx      ;...
+	push    cx      ;...
+	push    dx      ;...
+	push    di      ;to locate null
+	push    bp      ;pointer
+	mov     bp,sp   ;so we can use relative addressing
+	mov     di,[bp+14] ;address of text
+	xor     ax,ax   ;clear to indicate null follows call
+	or      ax,[di] ;let's see if it's null
+	jne     >a1     ;skip if not
+	xchg    bx,di   ;else use address in BX
+	add     bx,2    ;and point past null word to return address
+a1:     mov     dx,di   ;copy into text pointer
+	xchg    al,ah   ;in case string was only 1 byte, move it into msb's
+	mov     cx,80   ;max string length we will allow
+	xor     al,al   ;looking for null
+	repnz   scasb   ;loop till we find the null
+	mov     cx,di   ;get the pointer
+	sub     cx,dx   ;subtract the start of the string
+	dec     cx      ;don't print the null
+	or      ax,ax   ;see if we are using string following call
+	jne     >a2     ;skip if so
+	mov     di,bx   ;else get return address from BX
+a2:     mov     [bp+14],di ;update the return address
+	mov     bx,stderr ;standard handle for error device (screen)
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	pop     bp      ;restore registers...
+	pop     di      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	pop     ax      ;...
+	popf            ;and flags
+	ret
+;
+numprn:
+	push    bx      ;save registers
+	push    cx      ;...
+	push    dx      ;...
+	push    si      ;...
+	push    di      ;...
+	push    bp      ;...
+	sub     sp,6    ;need 5 spaces for number-to-string conversion
+			;plus one extra space for leading zero
+	mov     bp,sp   ;for relative addressing
+	xor     si,si   ;for clearing registers
+	mov     di,5    ;pointer into digits
+	mov     cx,10   ;constant for division
+	mov     byte [bp+di],'0' ;init with ASCII zero
+	or      ax,ax   ;is number zero?
+	je      >a2     ;if so, skip computation
+a1:     mov     byte [bp+di],'0' ;init with ASCII zero
+	mov     dx,si   ;clear high word
+	div     cx      ;put remainder in DX
+	or      [bp+di],dl ;and merge with '0' to make ASCII number
+	dec     di      ;adjust the pointer
+	or      ax,ax   ;see if we're done
+	jne     a1      ;loop if not
+	inc     di      ;adjust upwards for last DEC
+a2:     mov     cx,6    ;max chars to send, plus 1
+	sub     cx,di   ;subtract pointer to get actual number
+	lea     dx,[bp+di] ;address of string
+	mov     bx,stdprn ;standard handle for lineprinter
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	add     sp,6    ;clear off the buffer we made at entry
+	pop     bp      ;...
+	pop     di      ;...
+	pop     si      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	ret
+;
+numerr:
+	pushf
+	push    bx      ;save registers
+	push    cx      ;...
+	push    dx      ;...
+	push    si      ;...
+	push    di      ;...
+	push    bp      ;...
+	sub     sp,6    ;need 5 spaces for number-to-string conversion
+			;plus one extra space for leading zero
+	mov     bp,sp   ;for relative addressing
+	xor     si,si   ;for clearing registers
+	mov     di,5    ;pointer into digits
+	mov     cx,10   ;constant for division
+	mov     byte [bp+di],'0' ;init with ASCII zero
+	or      ax,ax   ;is number zero?
+	je      >a2     ;if so, skip computation
+a1:     mov     byte [bp+di],'0' ;init with ASCII zero
+	mov     dx,si   ;clear high word
+	div     cx      ;put remainder in DX
+	or      [bp+di],dl ;and merge with '0' to make ASCII number
+	dec     di      ;adjust the pointer
+	or      ax,ax   ;see if we're done
+	jne     a1      ;loop if not
+	inc     di      ;adjust upwards for last DEC
+a2:     mov     cx,6    ;max chars to send, plus 1
+	sub     cx,di   ;subtract pointer to get actual number
+	lea     dx,[bp+di] ;address of string
+	mov     bx,stderr ;standard handle for lineprinter
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	add     sp,6    ;clear off the buffer we made at entry
+	pop     bp      ;...
+	pop     di      ;...
+	pop     si      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	popf    ;...
+	ret
+;
+showfile:
+;Display a message with the current filename, called with BX pointing to
+; the ASCIZ name... Destroys DX and AX
+	call    txterr  ;print header stuff
+	db      'FORM3547 -- Working on file ',0
+	call    txterr  ;now print the filename
+	dw      0       ;word zero forces TXTERR to use addr in BX
+	call    txterr  ;now the CRLF
+	db      cr,lf,0 ;...
+	ret
+;
+buffer: end

@@ -1,0 +1,1620 @@
+;FORM3547.A86 - Print IPSS/FAX files on an HP PCL3-compliant printer.
+; Print 3 to a page. Leave a 1-1/4" margin on the left, and a 7/16" margin
+; at top, for the template data.
+;By default, will print ALL files.IMG in the current directory.
+;
+;Copyright (C) 1995 USPS
+;Contact the author for bug reports and suggestions at:
+;jcomeau@world.std.com (email)
+;1900 W. Oakland Park Blvd., Ft. Lauderdale, FL 33310-9998
+;
+;Modifications:
+; Added template with bold letters USPS instead of eagle
+; 5/16/95 Changed to print every 3 images instead of buffering all the
+;  converted files first.
+; 6/1/95 Leaves TEMP.TMP alone until ready to overwrite
+; 6/1/95 Added conditionals for 2-per-page, rather than separate source
+; 6/1/95 V063 Corrected bugs introduced in the above changes (I hope!)
+; 6/1/95 Adjusting # lines to chop at the bottom of 3-per-page images
+;        (V064) to allow printing of return-address barcodes
+; 6/6/95 Now searches to one level of subdirectories for .IMG files...
+;        Subdirectory names must also have .IMG extension (V065)
+; 6/7/95 Modifying output routines in anticipation of switching to a
+;        Genicom or similar high-speed dot matrix printer. V066
+; 6/11/95 Set hidden bit after processing so the file won't be reprocessed,
+;        2-per-page images will be in .IM2 subdirectories V067
+; 6/12/95 Using RAMDISK D: for TEMP.TMP until I upgrade this with a getenv()
+;        function. V068
+; 6/13/95 Rewrote text output functions for easier debugging. V069
+; 6/13/95 Implementing PCL5 method 2 compression and PostScript RLE, which
+;        uses an almost identical algorithm (R01)
+; 6/18/95 Skipping blank lines by using a "Y" offset, still with PCL-M2 (R02)
+; 6/19/95 Using alternating output files in order to reprint after a jam.
+;        What usually happens is that a jam occurs with one page already
+;        processed (the page which jammed in the process of being printed),
+;        another page already loaded into the printer's input buffer, and
+;        a third page already processed by the computer but, at the point of
+;        copying to the printer gets a bad status indication. So, the safest
+;        way to get all our images with the least chance of duplicates or
+;        garbaged output is do ABORT the current copy operation, POWER CYCLE
+;        or at least completely reset the printer, and then copy the last
+;        3 pages to it. Had to move Hufftbl to separate file.(R03)
+;
+debug=0 ;set to zero when debugged
+debug1=0 ;for first-wave debugging
+wide=0 ;set to zero for 3-per-page, this is for 2-per-page
+ramdisk=0 ;set to 1 to use D: for temp file
+genicom=0 ;set to one if GENICOM printer used, one image per form
+hppcl=1 ;set to one if Hewlett-Packard PCL-5 printer used, 2 or 3 images/form
+postscript=0 ;set to one if same format but Adobe Postscript used
+ibmpro=0 ;set to one if IBM Proprinter or compatible used, one image/form
+;printer types are mutually exclusive, so:
+#if hppcl
+	genicom=0
+	ibmpro=0
+	postscript=0
+#endif
+#if ibmpro
+	hppcl=0
+	genicom=0
+	postscript=0
+#endif
+#if genicom
+	hppcl=0
+	ibmpro=0
+	postscript=0
+#endif
+;compression modes for HP-PCL5
+method0=0 ;uncompressed
+method1=0 ;RLE
+method2=1 ;TIFF packbits - these 3 methods should be sufficient
+;note - don't enable more than one of the above
+cr      equ     13
+lf      equ     10
+ff      equ     12
+so      equ     14
+s       equ     15
+esc     equ     27
+dos     equ     21h
+inch    equ     300     ;dots per inch
+pagewid equ     8*inch  ;can't use 1/2" of width
+maxwid  equ     pagewid/8 ;max width in bytes
+black   equ     2       ;for word offset into table
+white   equ     0       ;black xor black
+stderr  equ     2       ;error device
+pagelen equ     11*inch ;dots/page (1/2" unusable)
+#if wide
+base    equ     pagelen/2 - inch/2 - inch/30 ;for 2 images/page
+increment equ   pagelen/2
+imgsPerPage equ 2
+#else
+base    equ     pagelen/3 - inch/30 ;for 3 images/page
+increment equ   pagelen/3
+imgsPerPage equ 3
+#endif
+;
+print   macro
+	info    'FORM3547 -- ',#1
+	#em
+
+info    macro
+	call    txterr
+	jmp     short >m1
+	db      #1,#2,cr,lf
+m1:
+	#em
+;
+errchk  macro
+	call    #1
+	#em
+;
+dbgmsg  macro
+	#if debug1
+	print   #1
+	#endif
+	#em
+;
+prntxt  macro
+;send specified text to PRN: device
+	call    txtprn   ;embed the text here in the code
+	jmp     short   >m1
+	db      #1,#2,#3,#4,#5,#6,#7,#8,#9
+m1:
+	#em
+;
+prnnum  macro
+;send specified number in decimal ASCII to PRN: device
+	push    ax      ;save current AX contents
+##if "#1" ne "ax"
+	mov     ax,#1   ;load up the number
+##endif        
+	call    numprn  ;do the conversion
+	pop     ax      ;restore AX
+	#em
+;
+stkvar  macro
+ttt=ttt-2
+#1=ttt
+	#em
+;
+begin   macro
+ttt=0
+	enter (#1*2),0
+	#em
+;
+	jmp     start
+wildcards: 
+#if !wide
+	db      "*.IMG",0
+#else
+	db      "*.IM?",0
+#endif ;!wide
+wildlen equ     $-offset wildcards ;length of null-terminated string
+basedir db      "..",0  ;for CHDIR back to base
+fileptr dw      0       ;for use with DOS findfile services    
+handle  dw      0       ;input file handle returned by DOS
+filesize dw     0       ;size of file returned in DTR
+width   dw      0       ;image width from header
+pwidth  dw      0       ;width in pixels
+pheight dw      0       ;height in pixels
+color   dw      0       ;color of current pel in decode line
+codsiz  dw      0       ;length of code currently using in table
+codlen  dw      0       ;length of code extracted from input file
+thiscode dw     0       ;code currently extracted
+byteptr dw      0       ;pointer into input file
+inbyte  dw      0       ;last byte from input file
+bits    dw      0       ;number of bits left in input byte
+linesdone dw    0       ;lines completed from current image
+image   dw      0       ;image being worked on, 0 to 3 (per page)
+thisbyte dw     0       ;current byte in decode line
+thisbit dw      80h     ;current bit in decode line
+thisline dw     offset lin1bf ;pointer to decode line
+refline dw      offset lin1bf ;pointer to reference line
+routine dw      readline,huffline ;routine for tag 0, tag 1
+lin1bf  db      maxwid dup 0 ;300*8=2400 pixels
+	db      01010101xb ;to force a match at end
+lin2bf  db      maxwid dup 0 ;same size
+	db      01010101xb ;to force a match at end
+blanks  dw      0       ;number of blank lines to be skipped
+#if ibmpro OR genicom
+bytebuf db      2400 dup 0 ;buffer for dot-matrix printers
+#endif ;ibmpro OR genicom
+#if hppcl AND method2 ;TIFF compression
+tiffbf  db      maxwid dup 0 ;store counts of matches & non-matches
+tbuffer db      (maxwid*2) dup 0 ;for string with embedded control bytes
+#endif ;hppcl method 2
+bufadr  dw      offset readbuf
+outfile dw      1       ;STDOUT until overwritten
+#if ramdisk
+outname db      'd:\temp'
+outnum  db      '0.tmp',0
+#else
+outname db      'temp'
+outnum  db      '0.tmp',0
+ofilenum db     0       ;number of output file (0-2 as per R03 modification)
+#endif ;ramdisk
+loadexec dw     0       ;for segment address of environment string
+	dw      offset cmdargs ;segmented pointer to command-line arguments
+	dw      0       ;store segment here at runtime
+	dw      offset cmdfcb,0   ;first FCB
+	dw      offset cmdfcb,0   ;2nd FCB
+command db      'c:\command.com',0
+	#if debug
+cmdargs db      ' /c copy/b temp'
+tempnum db      '0.tmp nul:',cr,0
+	#elseif ramdisk
+cmdargs db      ' /c copy/b d:\temp'
+tempnum db      '0.tmp prn:',cr,0
+	#else
+cmdargs db      ' /c copy/b temp'
+tempnum db      '0.tmp prn:',cr,0
+	#endif
+cmdfcb  db      0,"           ",0
+	db      25 dup (0)
+altdta  db      64 dup (0) ;alternate Disk Transfer Area
+altdta2 db      64 dup (0) ;another for subdirectory searches
+curDTA  dw      0       ;current DTA, init to null
+	even    ;align for quick access
+oldint24 dd     0       ;ISV entry for critical error handler
+;
+start:  info    "Print form 3547's from ISS-scanned images"
+	info    "Version R03, Copyright (C) 1995 USPS"
+	mov     bx,1000h ;number of paragraphs to keep
+	mov     ah,4ah  ;dos function to modify memory size
+	int     dos     ;assume OK
+	mov     dx,offset altdta ;make a safe DTA
+	mov     ah,1ah  ;SET DTA service
+	int     dos     ;assume OK
+	mov     curDTA,offset altdta ;save it for checking later
+	jmp     near    >a1
+a0:     mov     ah,3eh  ;file close function
+	mov     bx,handle ;get file handle
+	int     dos     ;close the file
+a1:     call    nextfile ;locate next file and open it
+	errchk  >e1     ;check on error
+	jc      >a9     ;exit if done
+	call    skiphdr ;skip IPSS header info
+	errchk  >e2
+	call    newcode  ;skip first EOL code, error if not found
+	errchk  >e3
+a2:     call    gettag  ;get tag bit, shift left to make offset
+	errchk  >e5      ;quit on EOF, get another file
+	call    routine[bx] ;call appropriate routine
+	errchk  >e4     ;check for errors or done
+	jmp     a2
+a9:     print   'Info - Completed file processing'
+	mov     ax,4c00h ;no errors
+	int     dos     ;exit to DOS
+e1:     jnc     ret     ;return if no carry
+	mov     ax,image ;see if we already sent formfeed
+	or      ax,ax   ;...
+	stc     ;set carry in any case
+	je      ret     ;return if all done
+	mov     image,2 ;otherwise force FF
+	call    imagedone ;eject page and return
+	stc     ;force exit
+	ret
+e2:     jnc     ret     ;return if no carry
+	print   'Error - Does not appear to be IPSS image'
+	pop     ax      ;don't return
+	jmp     near a0 ;get another file
+	ret
+e3:     je      ret     ;return if EOL found
+	print   'Error - Did not find EOL code at top of image'
+	pop     ax      ;don't return
+	jmp     near a0 ;get another file
+	ret
+e4:     ja      ret     ;return if not EOF nor error
+	pop     ax      ;don't return
+	call    imagedone ;clean up and prepare for next
+	jmp     near a0 ;get another file
+e5:     jnc     ret     ;return if no error
+	pop     ax      ;clean up stack
+	jmp     near a0 ;get another file
+;
+skiphdr:
+	dbgmsg  'Skipping IPSS file header'
+	mov     bx,240  ;skip first 240 bytes
+	mov     pheight,word readbuf[bx-14] ;get width and height
+	mov     pwidth,word readbuf[bx-12]
+	mov     byteptr,bx ;update the pointer
+	sub     filesize,bx ;...and size word, set carry if borrow
+;now we want to advance to the vertical and horizontal position that will
+;place the image at the lower right of the 1/3 sheet that the form uses.
+;There are 3150 dots per page vertically, 2400 horizontally. This leaves
+;1050 dots per image vertically - max IPSS image height is 1024 dots. Max
+;IPSS width is 2400, equal to the page size.
+;Also note that though only 3150 dots can be printed vertically, calculations        
+;must be based on the 11*300 = 3300 dots LENGTH per page.
+	mov     bx,image ;3 images per page
+	shl     bx,1    ;make word offset
+	jnz      >a1     ;skip if 2nd or 3rd image
+;now (re)create the output file        
+	mov     cx,0    ;zero attributes
+	mov     dx,offset outname ;point to output filename
+	mov     ah,3ch  ;create file, truncating if already exists
+	int     dos     ;do it now
+	errchk  >e1     ;abort on error
+	mov     outfile,ax ;store the returned handle
+	inc     ofilenum ;inc number for next time
+	mov     ax,3    ;make sure we're in bounds
+	cmp     ofilenum,al ;are we?
+	jne     >l1     ;continue if so
+	mov     ofilenum,ah ;else zero it out
+l1:     not     al      ;use to clear low two bits...
+	and     outnum,al ;like so...
+	and     tempnum,al ;two places
+	mov     al,ofilenum ;now set the file number...
+	or      al,'0'  ;make the number ASCII
+	mov     tempnum,al ;...
+	mov     outnum,al ;done.
+#if hppcl
+;send the escape sequences to initialize the page...
+	prntxt  esc,'%-12345X',esc,'E'
+	prntxt  esc,'&l0E' ;sets top margin to zero vs. default of 1/2"
+a1:     mov     ax,bottom[bx] ;get Y value from table
+	sub     ax,pheight ;now move up the number of dots the image occupies
+	prntxt  esc,'*p' ;send intro escape sequence
+	prnnum  ax      ;send the number in decimal ASCII
+	prntxt  'Y'     ;finally, end the escape sequence with "Y"
+	prntxt  esc,'*t'
+	prnnum  inch    ;resolution
+	prntxt  'R'     ;establishes DPI
+#endif ;hppcl
+	mov     width,pwidth ;copy pixel width into byte width
+	shr     width,1 ;now make width into byte count
+	jc      >a9     ;problem if not an even number of bytes
+	shr     width,1 ;...
+	jc      >a9     ;...
+	shr     width,1 ;...
+	jc      >a9     ;...
+	ret
+a9:     print   'Error - Image is not on byte boundaries'
+	ret
+;
+e1:     jnc     ret     ;return if no error
+	print   '*FATAL* - Output file could not be created'
+	mov     ax,4c01 ;exit with error code
+	int     dos
+;
+bottom  dw      base
+	dw      base+increment
+#if !wide
+	dw      base+2*increment
+#endif
+;
+tagfile:
+;put the name of the file in an inconspicuous place on the image, in case we
+;have to reprint the piece or, worse, locate the actual mailpiece in the
+;tray - the clerks can run 1 tray at a time and write down the piece count
+;at the end of each tray, then they will be able to locate the piece quite
+;easily in the trays, since the image filename will be the same as the
+;sequence number, possibly plus an offset as added by the IPSS-SIM program
+	dbgmsg  'Placing filename in small letters on the image'
+	prntxt  esc,'(s1p4v0s0b4148T',esc,'*p' ;select UNIVERS
+	mov     bx,image ;get number of image, 0-2
+	shl     bx,1    ;shift over to make word offset
+	mov     ax,bottom[bx] ;then get the number
+	sub     ax,50   ;not quite so low
+	prnnum  ax      ;convert to decimal ASCII and send it
+	prntxt  'Y',esc,'*p'
+	prnnum  inch/3
+	prntxt  'X'
+	mov     ah,2fh  ;get DTA address
+	int     dos     ;into BX
+	add     bx,30   ;point to filename string
+	prntxt  0       ;print it
+	ret
+;
+template:
+#if hppcl
+	prntxt  esc,'(8U',esc,')8M',esc,'(s1p18v0s3b4148T'
+	prntxt  esc,'*p'
+	prnnum  inch/3
+	prntxt  'Y'
+	call    >t2     ;print RETURN TO SENDER notice
+	prntxt  esc,'*p'
+	prnnum  inch/3+increment
+	prntxt  'Y'
+	call    >t2
+#if !wide        
+	prntxt  esc,'*p'
+	prnnum  inch/3+2*increment
+	prntxt  'Y'
+	call    >t2
+#endif ;!wide
+	prntxt  esc,'(s7V' ;switch to 7 pitch for fine print warning
+	prntxt  esc,'*p'
+	mov     ax,inch/6+increment/55
+	prnnum  ax
+	prntxt  'Y'
+	call    >t1     ;print warning
+	prntxt  esc,'*p'
+	add     ax,increment
+	prnnum  ax
+	prntxt  'Y'
+	call    >t1
+#if !wide
+	prntxt  esc,'*p'
+	add     ax,increment
+	prnnum  ax
+	prntxt  'Y'
+	call    >t1
+#endif ;!wide
+	prntxt  esc,'&a90P' ;rotate to print landscape
+	prntxt  esc,'(s12v0B' ;switch to medium stroke, 12 pitch
+	mov     ax,(increment/2)-inch-(inch/15)-(inch/30)
+	call    >t3     ;show "US POSTAL SERVICE FORM 3547"
+	add     ax,increment
+	call    >t3
+#if !wide
+	add     ax,increment
+	call    >t3
+#endif ;!wide
+	ret
+t1:     
+	prntxt  esc,'*p'
+	prnnum  5*inch+inch/3
+	prntxt  'X PENALTY FOR PRIVATE'
+	prntxt  esc,'*p'
+	prnnum  5*inch+inch/3
+	prntxt  'x+'
+	prnnum  inch/10
+	prntxt  'YUSE TO AVOID PAYMENT'
+	prntxt  esc,'*p'
+	prnnum  5*inch+inch/3
+	prntxt  'x+'
+	prnnum  inch/10
+	prntxt  'Y    OF POSTAGE, $300'
+	ret
+t2:     prntxt  esc,'&a10C',so,163,s,' return to sender ',so,163
+	prntxt  s,'     fee due 50',191,'                      USPS'
+	ret
+t3:     prntxt  esc,'&a0R',esc,'*p'
+	prnnum  ax
+	prntxt  'XU.S. POSTAL SERVICE'
+	add     ax,inch/30
+	prntxt  esc,'&a1R',esc,'*p'
+	prnnum  ax
+	prntxt  'X    PS FORM 3547'
+	ret
+#endif ;hppcl
+;
+imagedone:
+	dbgmsg  'Finishing up the image'
+	xor     ax,ax   ;for clearing registers
+	mov     linesdone,ax ;...
+	mov     color,ax ;always white to start
+	mov     thisbyte,ax ;clear byte pointer
+	mov     thisbit,80h ;reinit bit pointer
+	mov     bits,0  ;bit counter
+	mov     bx,offset lin1bf ;clear line buffers
+	call    clearline ;...
+	mov     bx,offset lin2bf ;...
+	call    clearline ;...
+	call    tagfile ;print filename at bottom left of image
+	inc     image   ;this image complete
+	mov     ax,imgsPerPage ;see if done a page...
+	cmp     ax,image ;...
+	jne     ret     ;done if not
+	call    template ;else overlay the template
+	prntxt  ff      ;issue a formfeed
+#if hppcl
+;send the escape sequences to reinitialize the printer...
+	prntxt  esc,'E',esc,'%-12345X' ;
+#endif ;hppcl        
+	mov     image,0 ;and clear the count
+;now the new code to send the file to the printer (5/16/95)
+	mov     ah,3fh  ;close file function
+	mov     bx,outfile ;output handle
+	int     dos     ;go ahead and close it
+;Revision R03 - check printer status, and, if there's a problem, tell the        
+;user to power cycle the printer; then reprint the last two pages plus this
+;one. 6/20/95
+a1:     mov     ah,2    ;use the BIOS for the printer test...
+	int     17h     ;quick and simple.
+	and     ah,20   ;check "out of paper" bit
+	jnz     >a2     ;skip ahead if clear...
+	jmp     near >a6 ;...
+a2:     call    txterr
+	jmp     short >a3
+	db      7,7,7,'There appears to be a problem with the printer; '
+	db      'it may be jammed',cr,lf,'or out of paper. When the problem '
+a3:     call    txterr
+	jmp     short >a4
+	db      'is fixed, please POWER IT OFF',cr,lf,'then back on, '
+	db      'otherwise you may get poor quality forms.',cr,lf
+a4:     call    txterr   
+	jmp     short >a5
+	db      'Press any key when ready...'
+a5:     mov     ah,7    ;console input, no echo
+	int     dos     ;tell DOS to wait
+	info    '...please discard any duplicates!'
+	mov     tempnum,'?' ;store wildcard in print command
+	jmp     near a1 ;loop back to make sure problem was corrected
+a6:     call    traperror ;set critical error handler
+	mov     ax,[2ch] ;get paragraph address of environment block from PSP
+	mov     word loadexec,ax ;store in in LOADEXEC block
+	mov     word [loadexec+4],ds ;store segment address of command args
+	mov     word [loadexec+8],ds ;and of FCBs
+	mov     word [loadexec+12],ds ;...
+	mov     dx,offset command
+	mov     bx,offset loadexec
+	mov     ax,4b00h ;EXEC, execute child program
+	int     dos     ;do it
+;now reset the DTA, since EXEC throws it into outer space
+	mov     dx,curDTA ;make a safe DTA
+	mov     ah,1ah  ;SET DTA service
+	int     dos     ;assume OK
+;finally, check printer status AGAIN to make sure we didn't get another jam        
+	mov     ah,2    ;use the BIOS for the printer test...
+	int     17h     ;quick and simple.
+	and     ah,20   ;check "out of paper" bit
+	jz      >a9     ;skip ahead if clear...
+	jmp     near a2 ;otherwise repeat the above bit        
+a9:     jmp     endtrap ;don't trap critical errors anywhere else
+;
+traperror:
+	mov     di,offset oldint24
+	mov     si,4*24h ;2 words per entry
+	xor     ax,ax   ;clear register...
+	mov     ds,ax   ;...to access Interrupt Vector Table (IVT)
+	cli     ;don't allow interrupts in the middle of the move
+	movsw   ;two words
+	movsw   ;...that does it
+	mov     word ptr [si-4],offset failerror ;set new trap handler
+	mov     [si-2],cs ;segment address too
+	sti     ;reenable interrupts
+	push    cs      ;now restore segment register...
+	pop     ds      ;that does it.
+	ret
+;
+failerror:
+	xchg    ax,di   ;swap, to check low byte
+	cmp     al,9    ;printer out of paper?
+	xchg    ax,di   ;swap back either way
+	jne     >a1     ;skip if not, use DOS handler
+	mov     al,3    ;else set FAIL
+	iret    ;return to DOS
+a1:     jmp     far dword ptr oldint24 ;use address we saved
+;
+endtrap:
+	mov     si,offset oldint24
+	mov     di,4*24h ;2 words per entry
+	xor     ax,ax   ;clear register...
+	mov     es,ax   ;...to access Interrupt Vector Table (IVT)
+	cli     ;don't allow interrupts in the middle of the move
+	movsw   ;two words
+	movsw   ;...that does it
+	sti     ;reenable interrupts
+	push    cs      ;now restore segment register...
+	pop     es      ;that does it.
+	ret
+;
+eolproc:
+;finish up the current decode line and send to lineprinter
+	dbgmsg  'EOLPROC - Entered routine'
+;reduce output by reading back from the end of the buffer to first nonzero
+; byte, and only sending that much to the output
+;6/1/95 In order to leave room at the bottom of the mailpiece to spray the        
+; return address barcode, we will stop printing the bottom 100 lines or so
+; of the mailpiece... may have to adjust that number...
+#if !wide ;doesn't matter when you've got half the darn sheet...       
+	mov     ax,linesdone ;get number of lines already completed
+	add     ax,150  ;add the offset desired from the bottom
+	cmp     ax,pheight ;compare to number of lines in the piece
+	jb      >a1     ;...
+	jmp     near >a8 ;so skip all this if it's more...
+#endif ;!wide
+a1:
+;#if ibmpro OR genicom        
+;lay out the data in bytes which represent columns, high bit at the top
+; of the column. Remember that the high bit of the decoded fax data, and
+; also for PCL, is the leftmost bit of the raster byte.
+;#endif ;ibmpro OR genicom
+#if hppcl        
+	mov     di,thisline ;get address of data
+	add     di,width ;point to end of it
+	dec     di      ;now pointing to final byte
+	std     ;search backwards
+	xor     al,al   ;for non-null
+	mov     cx,width ;count word
+	repz    scasb   ;search for first nonmatch (non-null)
+	cld             ;restore ordinary direction
+	jcxz    >a7     ;skip if nothing to print this time (R02)
+	inc     cx      ;adjust for overshoot
+	mov     di,thisline ;now start from beginning and do the same thing
+#if !method2 ;if compressing, compress leading nulls as well
+	repz    scasb   ;search for first non-null
+	inc     cx      ;adjust for overshoot
+	dec     di      ;...
+#else ;only if compressing, check if first line, and send X position once
+	cmp     linesdone,0
+	jne     >a4     ;skip if not first output line
+#endif ;method2
+	call    setXpos ;set X coordinate
+a4:     prntxt  esc,'*r1A',esc,'*b' ;start at current cursor position 
+	xor     ax,ax   ;clear register...
+	or      ax,blanks ;any blanks to print?
+	je      >a5     ;skip ahead if not
+	prnnum  ax      ;otherwise send "Y" offset
+	prntxt  'y'     ;tell HP what the number meant
+a5:     xor     ax,ax   ;clear the register...     
+	mov     blanks,ax ;null out the blank count
+#if method2 ;TIFF packbits?
+	call    tifcomp ;compress it first and insert "2m"
+	prntxt  '2m'    ;indicate method 2 compression
+#endif ;method2
+a6:     prnnum  cx      ;send width in bytes
+	prntxt  'W'     ;end of escape sequence
+	mov     dx,di   ;set up registers for WRITE
+;continues here with buffer address in DX and byte count in CX:
+	mov     ah,40h  ;...
+	mov     bx,outfile ;...
+	int     dos     ;do it...
+	jc      ret     ;quit on error
+	prntxt  esc,'*rB' ;end raster graphics mode
+	jmp     >a8     ;skip blank line increment
+#endif ;hppcl
+a7:     inc     blanks  ;inc the blank line count
+;
+a8:     inc     linesdone ;up the count of completed lines
+	mov     ax,offset lin1bf ;get buffer addresses
+	mov     bx,offset lin2bf ;...
+	cmp     ax,thisline ;are we using the first one?
+	jne     >a11    ;skip if not, we will now
+	xchg    ax,bx   ;otherwise swap
+a11:    mov     thisline,ax ;store new values for current line and ref line
+	mov     refline,bx ;...
+	mov     bx,ax   ;now clear the new current line
+	call    clearline ;...
+	xor     ax,ax   ;clear carry
+	mov     color,ax ;color white for new line
+	mov     thisbyte,ax ;clear pointer
+	mov     thisbit,80h ;...
+	or      ax,thisbit ;clear Z flag which is reserved for EOF
+	ret
+;
+setXpos:        
+	prntxt  esc,'*p' ;set up for horizontal positioning
+	mov     ax,2400 ;max image width...
+	sub     ax,pwidth   ;less what the image occupies
+	mov     bx,di   ;now figure in the offset to first non-null
+	sub     bx,thisline ;offset from start of buffer
+	shl     bx,1    ;multiply by 8 to make bytes into pixels
+	shl     bx,1    ;...
+	shl     bx,1    ;...
+	add     ax,bx   ;add offset just determined
+	prnnum  ax      ;send to the PCL printer...
+	prntxt  'X'     ;specify X coordinate and return
+	ret
+;
+#if hppcl AND method2 ;TIFF packbits
+;pseudocode:
+; lastc=string[0];
+; for (i=1, j=0; i < len; i++)
+;  c=string[i];
+;  if (c == lastc)
+;   if tiff[j] <= 0 // already in repeat count or only one byte counted
+;    {tiff[j]--; // repeat counts are negative; repeat count -1 means 2 reps
+;    // max repeat count is -127; -128 is a NOP (used as EOD by PostScript)
+;    if (tiff[j] = -128) {tiff[j]++; tiff[++j] = 0; continue;}}
+;   else // not now in repeat count, so advance to next cell
+;    // after first decrementing for what we counted as a literal
+;    {tiff[j]--; tiff[++j]=-1; continue;}
+;   endif;
+;  else // c is different from last time
+;   lastc = c;
+;   if tiff[j] < 0 // were we in repeat count up to now?
+;    {tiff[++j]=0; continue;} // if so, advance and clear next cell
+;   else // already in count of dissimilar bytes
+;    {tiff[j]++; //max is 127, meaning a string of 128 bytes
+;    if (tiff[j] < 0) {tiff[j]--; tiff[++j] = 0; continue;}} //if past max
+;   endif;
+;  endif;
+; endfor;
+;note from page 15-22 of PCL 5 Printer Language Reference Manual, Oct. 1992:
+;"It is more efficient to code two consecutive identical bytes as a repeated
+; byte. If these bytes are preceded and followed by literal bytes, however,
+; it is more efficient to code the entire group as literal bytes."
+; // next, compress the tiff control bytes according to the note above
+; for (i=1, k=0; i<=j;)
+;  if (tiff[i] = -1 && tiff[k] > 0 && tiff[i+1] > 0)
+;   tiff[k] = tiff[k] + tiff[i+1] + 3; i += 2; //leave k where it is
+;  else tiff[++k] = tiff[i++];
+; endfor; j = i - 1; // update end to reflect the compression
+; // now merge the control string with the raster data
+; for (o=0, n=0, m=0; o<=j; o++)
+;  buffer[o++] = tiff[n++]; // store the control byte and advance pointers
+;  if tiff[n] < 0 { // repeat count?
+;   {buffer[o++] = string[m]; m+=(-tiff[n] + 1); continue;}
+;  else
+;   for (p = 0; p <= tiff[n]; p++) // copy the literal chars to output
+;    {buffer[o++] = string[m+p];}
+;    m += (tiff[n] + 1); // advance pointer into string
+;   endfor;
+;  endif;
+; endfor;
+;
+tifcomp:        
+;we'll avoid using another variable for counting the strings by using 128        
+; (80h) as end-of-string marker, since PCL ignores it and PS uses it for
+; precisely that purpose...
+	or      cx,cx   ;first make sure we have something to do...
+	je      ret     ;return if not
+	push    bp      ;let's do it C-style
+	mov     bp,sp   ;...
+lastc = dl
+c = al
+zero = ah
+temp = dh
+	xor     ax,ax   ;we'll leave AH clear
+	mov     dx,ax   ;copy zero into last-byte register
+	push    cx      ;save current count
+	push    di      ;data pointer
+strlen = -2        
+pointer = -4
+	mov     si,di   ;get it into source pointer for LODSB
+	mov     bx,offset tiffbf ;point to buffer
+	mov     [bx],zero ;clear current location
+; lastc=string[0];
+	lodsb   ;load up a data byte
+	dec     cx      ;decrement the count
+	mov     lastc,c   ;copy the byte for later comparison
+;now, for the length of the data, count SAME bytes and NOT-SAME,
+; storing the counts in the array set up for that purpose.
+; for (i=1, j=0; i < len; i++)
+;  c=string[i];
+tiff = 0 ;not really, but we save bytes by hiding offset in j
+j = bx
+a1:     jcxz    >a5     ;pack it up when done counting        
+	lodsb   ;get next byte and advance pointer
+	dec     cx      ;dec the count
+;  if (c == lastc)
+	cmp     c,lastc ;same as last time?
+	jne      >a3     ;skip ahead if not
+;   if tiff[j] <= 0 // already in repeat count or only one byte counted
+;    {tiff[j]--; // repeat counts are negative; repeat count -1 means 2 reps
+	mov     temp,tiff[j] ;are we already counting repeat bytes?
+	or      temp,temp ;or perhaps have only one byte so far in this run?
+	jg      >a2     ;skip ahead if not
+	dec     byte ptr tiff[j] ;bumps "up" the repeat count
+;    // max repeat count is -127; -128 is a NOP (used as EOD by PostScript)
+;    if (tiff[j] = -128) {tiff[j]++; tiff[++j] = 0; continue;}}
+	cmp     temp,-127 ;was it most negative value?
+	jne     a1      ;loop if not
+	mov     tiff[j],temp ;restore value of current pointer...
+	inc     j       ;advance to next cell...
+	mov     tiff[j],zero ;initialize it...
+	jmp     short a1 ;loop
+;   else // not now in repeat count, so advance to next cell
+;    // after first decrementing for what we counted as a literal
+;    {tiff[j]--; tiff[++j]=-1; continue;}
+;   endif;
+a2:     dec     byte ptr tiff[j] ;we mistakenly counted it first as literal
+	inc     j       ;point to next cell...
+	mov     byte ptr [j],-1 ;store repeat count of 2
+	jmp     short   a1      ;loop back around
+;  else // c is different from last time
+;   lastc = c;
+a3:     mov     lastc,c ;store it for next comparison
+;   if tiff[j] < 0 // were we in repeat count up to now?
+;    {tiff[++j]=0; continue;} // if so, advance and clear next cell
+	test    byte ptr [j],80h ;is current count a repeat count?
+	je      >a4     ;skip if not
+	inc     j       ;advance to next array element
+	mov     tiff[j],zero ;clear it
+	jmp     short a1 ;loop
+;   else // already in count of dissimilar bytes
+;    {tiff[j]++; //max is 127, meaning a string of 128 bytes
+a4:     inc     byte ptr tiff[j] ;up count of literal bytes
+;    if (tiff[j] < 0) {tiff[j]--; tiff[++j] = 0; continue;}} //if past max
+	jns     a1      ;loop if it didn't overflow into high bit
+	dec     byte ptr tiff[j] ;else make it 127
+	inc     j       ;point to next array element
+	mov     tiff[j],zero ;clear it
+	jmp     short a1 ;loop
+;   endif;
+;  endif;
+; endfor;
+; // next, compress the tiff control bytes according to the note above
+a5:     inc     j       ;but first store EOD marker...
+	mov     byte ptr tiff[j],80h ;at the end of the control string
+minus1 = al ;define value
+tiff = 0 ;not really, but saves a fetch each time
+i = bx   ;we cheat and hide the offset in the integer variables
+k = di
+; for (i=1, k=0; i<=j; i++)
+	mov     i,offset tiffbf+1 ;start at offset 1 from start of buffer
+	mov     k,offset tiffbf ;at offset zero to start compressing
+;  if (tiff[i] = -1 && tiff[k] >= 0 && tiff[i+1] >= 0)
+	mov     minus1,-1 ;done with AL, use it for constant
+a6:     cmp     tiff[i],minus1 ;check it out...
+	jne     >a7     ;move on if not
+	cmp     tiff[k],zero ;now test for literals on each side
+	jl      >a7     ;move on if not
+	cmp     tiff[i+1],zero ;...
+	jl      >a7     ;same story
+;   tiff[k] = tiff[k] + tiff[i+1] + 3; i += 2; //leave k where it is
+	mov     temp,tiff[i+1] ;now get following cell value
+	add     tiff[k],temp ;add that in too
+	add     byte ptr tiff[k],3  ;now add 2 for the chars, +1 implied
+;implied? just remember: a count of zero implies a 1, so two counts of zero,
+; added together, will not reflect the actual status unless you add a one.
+	add     i,2    ;skip the two bytes we just merged into tiff[k]
+	jmp     short a6 ;now loop back around
+;  else tiff[++k] = tiff[i++];
+a7:     inc     k       ;advance source pointer
+	mov     temp,tiff[i] ;get tiff[i]
+	mov     tiff[k],temp ;store as tiff[k]
+	inc     i       ;then update i
+	cmp     temp,80h  ;EOD? continue if so
+	jne     a6      ;else loop
+; // now merge the control string with the raster data
+; for (o=0, n=0, m=0; o<=j; o++)
+o = di
+n = bx
+m = si
+buffer = 0 ;again, not really, just for ease in reading
+tmp = al
+	mov     m,pointer[bp] ;get raster data pointer
+	mov     o,offset tbuffer ;now the output buffer pointer
+	mov     n,offset tiffbf ;control string
+a8:     cmp     byte ptr tiff[n],80h ;end of the control string?
+	jne     >a9     ;continue if not
+	dec     o       ;point back to last byte written
+	mov     cx,o    ;store in count register
+	mov     o,offset tbuffer ;get count of compressed bytes...
+	sub     cx,o    ;...
+	mov     sp,bp   ;restore stack pointer
+	pop     bp      ;then frame pointer
+	ret     ;that's all
+;  buffer[o++] = tiff[n++]; // store the control byte and advance pointers
+a9:     mov     tmp,tiff[n] ;get next control byte
+	inc     n       ;advance the pointer
+	stosb   ;move it into the output string
+;  if tiff[n] < 0 { // repeat count?
+	or      tmp,tmp ;check sign bit
+	jge     >a10    ;skip if not set
+;   {buffer[o++] = string[m]; m+=(-tiff[n] + 1); continue;}
+	mov     cx,ax   ;else get the count
+	neg     cl      ;make it positive (just low byte used)
+	;don't adjust for implied 1, since this MOVSB will advance the ptr...
+	movsb   ;only store one of them, however...
+	rep     lodsb   ;then just skip over the raster data
+	jmp     short a8 ;loop back around
+;  else
+;   for (p = 0; p <= tiff[n]; p++) // copy the literal chars to output
+;    {buffer[o++] = string[m+n];}
+;    m += tiff[n] + 1; // advance pointer into string
+;   endfor;
+;  endif;
+; endfor;
+a10:    mov     cx,ax   ;get count as word
+	inc     cx      ;adjust for implied 1
+	rep     movsb   ;store the literal bytes
+	jmp     short a8 ;loop till EOD byte (128) found
+#endif ;hppcl&method2
+;
+nextfile:
+	dbgmsg  'Looking for another file to process'
+	mov     ah,4fh  ;assume DTA already initialized
+	mov     bx,curDTA ;get current DTA
+	mov     cx,10h  ;get subdirectories but not hidden files
+	xor     dx,dx   ;for test
+	or      dx,fileptr ;is a pointer defined?
+	jne     >l0     ;continue if so
+	mov     dx,offset wildcards ;else use *.IMG
+	mov     ah,4eh  ;specify new search
+l0:     cmp     bx,offset altdta2 ;are we on lower level?
+	jne     >l1     ;skip if not
+	push    ax      ;save DOS service number
+	push    dx      ;save wildcard string
+	mov     dx,offset altdta+30 ;else point to name of subdirectory
+	mov     ah,3bh  ;CHDIR service
+	int     dos     ;go for it, don't bother checking result
+	pop     dx      ;restore wildcard pointer
+	pop     ax      ;and service number
+l1:     mov     fileptr,dx ;make sure to use correct function next time
+	cmp     bx,offset altdta2 ;are we already one level deep?
+	jne     >l2     ;continue if not
+	mov     cx,0    ;otherwise don't search for subdirectories
+l2:     int     dos     ;load DTA with file info
+	errchk  >e1     ;if no more files, check for lower level
+	test    byte [bx+21],10h ;is it a subdirectory?
+	je      >l3     ;continue if not
+	mov     dx,offset altdta2 ;else use the next DTA down
+	mov     fileptr,0 ;clear filename string pointer
+	mov     ah,1ah  ;SET DTA service
+	int     dos     ;assume OK
+	mov     curDTA,offset altdta2 ;save it for checking later
+	jmp     short nextfile ;loop back to try again
+l3:     
+#if debug1
+	test    byte [bx+21],2 ;is it hidden?
+	je      >l4     ;skip if not
+	print   'File has HIDDEN bit set'
+l4:
+#endif ;debug
+	add     bx,30   ;point to filename string
+	call    showfile ;let user know which file we're working on
+	mov     dx,bx   ;move to appropriate register for call
+	mov     ax,4301h ;set attributes function
+	mov     cx,2    ;hidden bit
+	int     dos     ;set the bit so the file is inaccessable next time
+	mov     ax,3d00h ;open for read
+	int     dos     ;call DOS
+	errchk  >e2     ;check for error
+	sub     bx,4    ;point to file size
+	mov     handle,ax ;save the handle
+	mov     cx,[bx] ;get size from DTA
+	mov     filesize,cx ;store it for later
+#if debug1
+	call    txterr
+	jmp     short >l5
+	db      'File size is'
+l5:     mov     ax,cx
+	call    numerr
+	call    txterr
+	jmp     short >l6
+	db      cr,lf
+l6:
+#endif ;debug1
+	mov     dx,offset readbuf ;point to buffer
+	mov     bx,handle ;get the handle
+	mov     ah,3fh  ;use READ function
+	int     dos     ;do it...
+	mov     ax,offset altdta2 ;check if we're on lower level
+	cmp     ax,curDTA ;are we?
+	jne     ret     ;done if not
+	jmp     cd_up   ;else cd ..
+	ret
+e1:     jnc     ret     ;return if OK
+	pop     ax      ;clean up stack
+	mov     ax,curDTA ;for comparison
+	cmp     ax,offset altdta2 ;are we on lower level?
+	jc      ret     ;return carry set if not
+;programmer's note: ALTDTA2 must be positioned *after* ALTDTA for jc to work
+	mov     dx,offset altdta ;switch back to primary DTA
+	mov     ah,1ah  ;set DTA service
+	int     dos     ;assume OK
+	mov     curDTA,offset altdta ;save the changed pointer
+	call    cd_up   ;move back up to base directory
+	jmp     nextfile ;loop back to try again
+e2:     jnc     ret     ;return if OK
+	pop     ax      ;clean up stack
+	print   'Error opening file, skipping this one'
+	call    cd_up   ;set default back with cd..
+	stc     ;re-set the carry flag
+	ret
+;
+cd_up:
+	push    dx      ;save registers
+	push    ax
+	mov     dx,offset basedir ;point back up to starting point
+	mov     ah,3bh  ;CHDIR service
+	int     dos     ;go for it, don't bother checking result
+	pop     ax      ;restore registers and return
+	pop     dx
+	ret
+;
+;The following code formats messages for the output devices:
+;
+txtprn:
+;if followed by an ASCIZ string, prints the string to OUTFILE; if followed
+; immediately by a null, uses string address in BX
+	pushf           ;save flags
+	push    ax      ;save registers we will be using
+	push    bx      ;...
+	push    cx      ;...
+	push    dx      ;...
+	push    di      ;to locate null
+	push    bp      ;pointer
+	mov     bp,sp   ;so we can use relative addressing
+	mov     di,[bp+14] ;address of text, after we...
+	add     di,2    ;point past the branch
+	mov     al,[di] ;let's see if it's null...
+	or      al,al   ;...
+	mov     dx,di   ;assume it's not
+	jne     >a2     ;skip if not
+	mov     dx,bx   ;else use address in BX
+	mov     di,dx   ;copy pointer to start of string
+	mov     cx,80   ;max string length
+	xor     al,al   ;look for null
+	repnz   scasb   ;loop till null is found
+	mov     cx,di   ;get original pointer
+	sub     cx,dx   ;subtract string start
+	dec     cx      ;don't print the null
+	jmp     short   >a3
+a2:     mov     bx,[bp+14] ;get the address of the branch instruction
+	mov     cl,byte ptr [bx+1] ;load the offset into count register
+	xor     ch,ch   ;clear the high byte
+a3:     mov     bx,outfile ;output file
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	pop     bp      ;restore registers...
+	pop     di      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	pop     ax      ;...
+	popf            ;and flags
+	ret
+;
+txterr:
+;if followed by a string, prints the string to STDERR; if followed
+; immediately by a null, uses string address in BX
+	pushf           ;save flags
+	push    ax      ;save registers we will be using
+	push    bx      ;...
+	push    cx      ;...
+	push    dx      ;...
+	push    di      ;to locate null
+	push    bp      ;pointer
+	mov     bp,sp   ;so we can use relative addressing
+	mov     di,[bp+14] ;address of text, after we...
+	add     di,2    ;point past the branch
+	mov     al,[di] ;let's see if it's null...
+	or      al,al   ;...
+	mov     dx,di   ;assume it's not
+	jne     >a2     ;skip if not
+	mov     dx,bx   ;else use address in BX
+	mov     di,dx   ;copy pointer to start of string
+	mov     cx,80   ;max string length
+	xor     al,al   ;look for null
+	repnz   scasb   ;loop till null is found
+	mov     cx,di   ;get original pointer
+	sub     cx,dx   ;subtract string start
+	dec     cx      ;don't print the null
+	jmp     short   >a3
+a2:     mov     bx,[bp+14] ;get the address of the branch instruction
+	mov     cl,byte ptr [bx+1] ;load the offset into count register
+	xor     ch,ch   ;clear the high byte
+a3:     ;skipped to here if address was in BX and we had to find end
+	mov     bx,stderr ;standard handle for error device (screen)
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	pop     bp      ;restore registers...
+	pop     di      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	pop     ax      ;...
+	popf            ;and flags
+	ret
+;
+numprn:
+	push    bx      ;save registers
+	push    cx      ;...
+	push    dx      ;...
+	push    si      ;...
+	push    di      ;...
+	push    bp      ;...
+	sub     sp,6    ;need 5 spaces for number-to-string conversion
+			;plus one extra space for leading zero
+	mov     bp,sp   ;for relative addressing
+	xor     si,si   ;for clearing registers
+	mov     di,5    ;pointer into digits
+	mov     cx,10   ;constant for division
+	mov     byte [bp+di],'0' ;init with ASCII zero
+	or      ax,ax   ;is number zero?
+	je      >a2     ;if so, skip computation
+a1:     mov     byte [bp+di],'0' ;init with ASCII zero
+	mov     dx,si   ;clear high word
+	div     cx      ;put remainder in DX
+	or      [bp+di],dl ;and merge with '0' to make ASCII number
+	dec     di      ;adjust the pointer
+	or      ax,ax   ;see if we're done
+	jne     a1      ;loop if not
+	inc     di      ;adjust upwards for last DEC
+a2:     mov     cx,6    ;max chars to send, plus 1
+	sub     cx,di   ;subtract pointer to get actual number
+	lea     dx,[bp+di] ;address of string
+	mov     bx,outfile ;handle for output file
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	add     sp,6    ;clear off the buffer we made at entry
+	pop     bp      ;...
+	pop     di      ;...
+	pop     si      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	ret
+;
+numerr:
+	pushf
+	push    bx      ;save registers
+	push    cx      ;...
+	push    dx      ;...
+	push    si      ;...
+	push    di      ;...
+	push    bp      ;...
+	sub     sp,6    ;need 5 spaces for number-to-string conversion
+			;plus one extra space for leading zero
+	mov     bp,sp   ;for relative addressing
+	xor     si,si   ;for clearing registers
+	mov     di,5    ;pointer into digits
+	mov     cx,10   ;constant for division
+	mov     byte [bp+di],'0' ;init with ASCII zero
+	or      ax,ax   ;is number zero?
+	je      >a2     ;if so, skip computation
+a1:     mov     byte [bp+di],'0' ;init with ASCII zero
+	mov     dx,si   ;clear high word
+	div     cx      ;put remainder in DX
+	or      [bp+di],dl ;and merge with '0' to make ASCII number
+	dec     di      ;adjust the pointer
+	or      ax,ax   ;see if we're done
+	jne     a1      ;loop if not
+	inc     di      ;adjust upwards for last DEC
+a2:     mov     cx,6    ;max chars to send, plus 1
+	sub     cx,di   ;subtract pointer to get actual number
+	lea     dx,[bp+di] ;address of string
+	mov     bx,stderr ;standard handle for error device
+	mov     ah,40h  ;specify write function
+	int     dos     ;do it...
+	add     sp,6    ;clear off the buffer we made at entry
+	pop     bp      ;...
+	pop     di      ;...
+	pop     si      ;...
+	pop     dx      ;...
+	pop     cx      ;...
+	pop     bx      ;...
+	popf    ;...
+	ret
+;
+showfile:
+;Display a message with the current filename, called with BX pointing to
+; the ASCIZ name... Destroys DX and AX
+	call    txterr  ;print header stuff
+	jmp     short >a1
+	db      'FORM3547 -- Working on file '
+a1:     call    txterr  ;now print the filename
+	jmp     short >a2
+	db      0       ;only need byte
+a2:     call    txterr  ;now the CRLF
+	jmp     short >a3
+	db      cr,lf
+a3:     ret
+;
+;Code from here on is independent of the output device:
+;
+clearline:
+;clear 300-byte buffer pointed to by BX
+	mov     di,bx   ;so we can use fast instructions
+	mov     cx,150  ;words are faster too
+	xor     ax,ax   ;store zeroes
+	repz    stosw   ;do it...
+	ret
+;
+readline:
+;Process a READ-encoded line of input data
+	dbgmsg  'READLINE - Entered routine'
+a1:     call    readcode ;process next code from input stream
+	errchk  >e1     ;abort on error
+	jne     a1      ;loop till EOL code found
+	mov     ax,thisline ;make current line the new reference line
+	mov     refline,ax ;...
+	jmp     eolproc ;send the line to output
+e1:     jnc     ret     ;return if no error
+	print   'Warning - Error translating READ-encoded line'
+	pop     ax      ;don't return within routine
+	ret     ;to previous caller
+;
+readcode:
+	dbgmsg  'READCODE - Entered routine'
+	call    newcode ;find first 1 bit
+	errchk  >e1     ;check on EOF error
+	mov     bx,codlen ;get length of zero-extended code
+	cmp     bx,6    ;max length is 6 to first 1 bit
+	errchk  >e2     ;error if more
+	shl     bx,1    ;make word offset from length word
+	jmp     >a1[bx-2]  ;jump to proper routine
+a1      dw      offset >a2,offset >a3,offset >a4
+	dw      offset >a5,offset >a6,offset >a7
+a2:     xor     bx,bx   ;vertical offset 0
+	jmp     vertmode ;go paint it
+a3:     mov     bx,1    ;vertical offset + or -1
+	jmp     near >a8 ;find out which, then paint it
+a4:     jmp     tworuns ;two Huffman-encoded runs follow, go to it
+a5:     jmp     passmode ;skip next two runs in reference line
+a6:     mov     bx,2   ;vertical offset + or -2
+	jmp     near >a8 ;find out which, then paint it
+a7:     mov     bx,3   ;vertical offset + or -3
+a8:     call    inccode ;get following bit to find direction
+	and     thiscode,1 ;test for positive
+	jne     >a9      ;skip if correct
+	neg     bx      ;else adjust accordingly
+a9:     jmp     vertmode
+e1:     ja      ret     ;return if neither C nor Z set
+	pop     ax      ;throw away return address
+	jc      ret     ;return on EOF error
+	mov     ax,thisbyte
+	cmp     ax,width ;EOL, did we really finish the line?
+	je      ret     ;return Z set if so
+	print   'WARNING - Unexpected EOL code in READ data stream'
+	xor     ax,ax   ;set Z flag
+	ret
+e2:     jbe     ret     ;return if code within range
+	print   'ERROR - Code found was not valid READ code'
+	pop     ax      ;throw return address
+	stc     ;don't continue with this image
+	ret
+;
+vertmode:
+;process a run in vertical mode. BX has the offset.
+	dbgmsg  'VERTMODE - Entered routine'
+	mov     si,thisbyte ;get byte pointer into decode line
+	mov     ax,thisbit ;and bit pointer...
+	mov     cx,refline ;get pointer to reference line
+	xchg    bx,cx   ;swap with offset
+	mov     di,width ;and point DI to EOL
+	mov     dx,color ;test current color value
+	or      dx,dx   ;zero is white...
+	je      >w1      ;skip if so
+;if here, current color is black, so...
+;look for first transition from black-to-white on reference line (b1)
+	test    [bx+si],al ;check the bit just above a0
+	jne     >s2     ;skip if black, just look for next white
+s1:;otherwise we have to look for a black run first...
+	shr     al,1      ;skip to next bit
+	errchk  >e1     ;adjust if it fell out
+	test    [bx+si],al ;is it still white?
+	je      s1      ;keep looping if so
+s2:     shr     al,1      ;skip to next bit
+	errchk  >e1     ;adjust if it fell out
+	test    [bx+si],al ;is it still black?
+	jne     s2      ;loop if so
+;Now we're pointing to the b1 pel on the reference line. The trick now is to
+; paint the black pels from a0 up to the offset specified in CX.
+	jmp     >p1     ;skip to paint routine
+w1:;current color is white, so we're looking for a white-to-black transition
+	test    [bx+si],al ;is the bit above a0 white?
+	je      >w3     ;skip if so, we just need to look for black
+;otherwise, we must first skip the current black run, it doesn't count
+	or      si,si   ;see if we're at start of line
+	jne     >w2     ;continue if not
+	or      al,al   ;at start, AL is negative if taken as signed (80h)
+	jns     >w2     ;so continue if not
+;At the start of a line, a0 is the imaginary white pel to the left of the
+; decode line; so since the first reference pel was black, we are already
+; pointing to the first transition pel (b1).
+	jmp     near >p1 ;go straight to paint routine
+w2:     shr     al,1      ;next bit
+	errchk  >e1     ;adjust on rollover
+	test    [bx+si],al ;is it still black?
+	jne     w2      ;loop if so
+w3:     shr     al,1      ;next bit down
+	errchk  >e1     ;adjust if necessary
+	test    [bx+si],al ;still white?
+	je      w3      ;loop if so
+p1:     mov     bx,thisline ;no longer need reference line
+	or      cx,cx   ;check if offset is positive or negative
+	js      >p4     ;skip if negative
+	je      >p6     ;skip further if zero
+p2:     shr     al,1      ;shift right until offset is reached
+	errchk  >e3     ;use similar adjust routine as above
+	loop    p2      ;for count in CX
+	jmp     near >p6 ;now paint it
+p4:     neg     cx      ;make the count positive
+p5:     shl     al,1      ;shift left for negative number
+	errchk  >e2     ;different rollover routine needed
+	loop    p5      ;for count in CX
+p6:     or      dx,dx   ;is color to be painted white?
+	je      >p10    ;just adjust pointers if so
+	mov     di,si   ;else copy dest pointers
+	mov     dx,ax   ;bit also
+	mov     si,thisbyte ;restore original source values...
+	mov     ax,thisbit ;...
+p7:     or      [bx+si],al ;start at a0 and paint up to specified offset
+	shr     al,1      ;skip to next bit
+	errchk  >e3     ;adjust when necessary
+	cmp     si,di   ;loop till pointers are equal
+	jb      p7      ;...
+	cmp     ax,dx   ;...
+	jne     p7
+p10:    mov     thisbyte,si ;update the pointers
+	mov     thisbit,ax ;...
+	mov     ax,black ;change color for next time
+	xor     color,ax ;...
+	or      ax,ax   ;clear Z flag
+	ret     ;with carry clear from OR
+e1:     jnc     ret     ;continue if bit still within bounds
+	mov     al,80h  ;else reset to top of the byte
+	inc     si      ;update byte pointer
+	cmp     di,si   ;at end of the line?
+	ja      ret     ;continue if not
+	pop     bp      ;don't return to where called
+	or      cx,cx   ;better be a negative or zero offset
+	jle     p1      ;just go paint it if so
+	print   'Error - Vertical mode pointer out of bounds'
+	stc     ;set error flag
+	ret     ;to previous caller
+e2:     jnc     ret     ;continue if bit didn't fall off the top
+	mov     al,1    ;else start it at the bottom
+	dec     si      ;and move byte pointer back one
+	ret     ;now continue where we left off
+e3:     jnc     ret     ;continue if bit still within bounds
+	mov     al,80h  ;else reset to top of the byte
+	inc     si      ;update byte pointer
+	ret
+;
+passmode:
+;Locate pixel b2 as explained on p.168 of Hummel's _Data and Fax
+; Communications_, then paint the a0 color to the pel on the decode line
+; just before b2. Uses pretty much the same logic as VERTMODE, except
+; we're skipping two transitions not just one. Also, color does not change
+; afterwards as it does in VERTMODE.
+	dbgmsg  'PASSMODE - Entered routine'
+	mov     si,thisbyte ;get byte pointer into decode line
+	mov     ax,thisbit ;and bit pointer...
+	mov     bx,refline ;get pointer to reference line
+	mov     di,width ;and point DI to EOL
+	mov     dx,color ;test current color value
+	or      dx,dx   ;zero is white...
+	je      >w1      ;skip if so
+;look for first transition from black-to-white on reference line (b1)
+	test    [bx+si],al ;check the bit just above a0
+	jne     >s2     ;skip if black, just look for next white
+s1:;otherwise we have to look for a black run first...
+	shr     al,1      ;skip to next bit
+	errchk  >e1     ;adjust if it fell out
+	test    [bx+si],al ;is it still white?
+	je      s1      ;keep looping if so
+s2:     shr     al,1      ;skip to next bit
+	errchk  >e1     ;adjust if it fell out
+	test    [bx+si],al ;is it still black?
+	jne     s2      ;loop if so
+s3:;now skip one more time, to b2 transition, white-to-black
+	shr     al,1      ;next bit down
+	errchk  >e1     ;adjust on rollover
+	test    [bx+si],al ;still white?
+	je      s3      ;loop if so
+	jmp     >p1     ;skip to paint routine
+w1:;current color is white, so we're looking for a white-to-black transition
+	test    [bx+si],al ;is the bit above a0 white?
+	je      >w3     ;skip if so, we just need to look for black
+;otherwise, we must first skip the current black run, it doesn't count
+	or      si,si   ;see if we're at start of line
+	jne     >w2     ;continue if not
+	or      al,al   ;at start, AL is negative if taken as signed (80h)
+	jns     >w2     ;so continue if not
+;At the start of a line, a0 is the imaginary white pel to the left of the
+; decode line; so since the first reference pel was black, we are already
+; pointing to the first transition pel (b1).
+	jmp     near >w4 ;now go find b2
+w2:     shr     al,1    ;next bit
+	errchk  >e1     ;adjust on rollover
+	test    [bx+si],al ;is it still black?
+	jne     w2      ;loop if so
+w3:     shr     al,1      ;next bit down
+	errchk  >e1     ;adjust if necessary
+	test    [bx+si],al ;still white?
+	je      w3      ;loop if so
+w4:;skip one more time to next transition, black-to-white, b2
+	shr     al,1      ;next bit
+	errchk  >e1     ;adjust on rollover
+	test    [bx+si],al ;still black?
+	jne     w4      ;loop if so
+p1:     mov     bx,thisline ;no longer need reference line
+p6:     or      dx,dx   ;is color to be painted white?
+	je      >p10    ;just adjust pointers if so
+	mov     di,si   ;else copy dest pointers
+	mov     dx,ax   ;bit also
+	mov     si,thisbyte ;restore original source values...
+	mov     ax,thisbit ;...
+p7:     or      [bx+si],al ;start at a0 and paint up to specified offset
+	shr     al,1      ;skip to next bit
+	errchk  >e3     ;adjust when necessary
+	cmp     si,di   ;loop till pointers are equal
+	jb      p7      ;...
+	cmp     ax,dx   ;...
+	jne     p7
+p10:    mov     thisbyte,si ;update the pointers
+	mov     thisbit,ax ;...
+	or      ax,ax   ;clear error flag and Z flag
+	ret
+e1:     jnc     ret     ;continue if bit still within bounds
+	mov     al,80h  ;else reset to top of the byte
+	inc     si      ;update byte pointer
+	cmp     di,si   ;at end of the line?
+	ja      ret     ;continue if not
+	pop     bp      ;don't return to where called
+	jmp     p1      ;just paint it
+e3:     jnc     ret     ;continue if still within bounds
+	mov     al,80h  ;reset to top of byte
+	inc     si      ;adjust pointer
+	ret
+;
+tworuns:
+;On READ-encoded line, extract and paint the next two Huffman-encoded runs
+	dbgmsg  'TWORUNS - Entered routine'
+	push    color   ;current color on stack
+	mov     bp,sp   ;pointer to it
+a1:     call    getcode ;get next code
+	errchk  >e1     ;abort on error
+	call    huffout ;paint the pixels
+	errchk  >e2     ;abort on error
+	mov     ax,[bp] ;get entry color back
+	cmp     color,ax ;same color as before?
+	je      a1      ;continue if so
+a2:     call    getcode ;do the whole thing over for next color...
+	errchk  >e1     ;...
+	call    huffout ;...
+	errchk  >e2     ;...
+	mov     ax,[bp] ;get entry color back
+	cmp     color,ax ;this time we want to check for original color
+	jne     a2      ;so if different, keep looping
+	or      ax,bp   ;clear carry and Z, and return
+	pop     ax      ;get color off stack
+	ret
+e1:     ja      ret     ;no error nor EOL, continue
+	pop     ax      ;else back to previous caller
+	pop     ax      ;clean up stack
+	ret
+e2:     jnc     ret     ;return if no error
+	pop     ax      ;else abort
+	pop     ax      ;clean up stack
+	ret
+;
+getbyte:
+;load up a new byte from input
+	push    bx
+	mov     bx,byteptr ;get pointer address
+	mov     bl,readbuf[bx]  ;get byte at that address
+	mov     byte inbyte,bl ;load up the byte
+	inc     byteptr ;update the pointer
+	mov     bx,1    ;'cause DEC doesn't set carry
+	sub     filesize,bx ;...
+	pop     bx
+	ret
+;
+newcode:
+;extract bits from input into THISCODE - return Z set on EOL, C on EOF
+	push    ax      ;save register
+	xor     ax,ax   ;clear any old register
+	mov     thiscode,ax ;clear code
+	mov     codlen,ax ;clear code length
+	call    inccode ;then get first set bit from input
+	pop     ax      ;restore AX
+	ret
+inccode:
+	push    ax      ;save AX register
+a1:     mov     ax,bits ;any bits left in current byte?
+	or      ax,ax   ;we'll see...
+	jne     >a2     ;skip if so
+	call    getbyte ;else get a new byte from input
+	errchk  >e1     ;check for error
+	mov     bits,8 ;reflect new byte in BITS count
+a2:     inc     codlen  ;update registers
+	dec     bits    ;...
+	shl     thiscode,1 ;move code up one bit
+	shr     inbyte,1  ;move low bit into carry
+	adc     thiscode,0 ;merge into low bit
+	je      a1      ;loop till nonzero
+	mov     ax,12   ;for comparison
+	cmp     ax,codlen ;see if same or more
+	ja      >a3     ;return if less than 12 bits
+	mov     ax,1    ;return Z set if code is 1 (EOL)
+	sub     ax,thiscode ;...
+	or      ax,ax   ;but clear carry flag, used only for errors
+a3:     pop     ax      ;restore AX
+	ret
+e1:;return if carry set from GETBYTE
+	jnc     ret     ;continue if not
+	pop     ax      ;throw away return address
+	pop     ax      ;restore AX
+	ret
+gettag:
+	xor     bx,bx   ;zero out BX
+	mov     codlen,bx ;clear code length
+	inc     bx      ;make it one
+	mov     thiscode,bx ;make code nonzero
+	call    inccode ;now get next bit
+	mov     bx,1    ;for AND
+	and     bx,thiscode ;will be 1 for Huffman-encoded line
+	shl     bx,1    ;make word offset and return
+	ret
+;
+huffline:
+;translate and paint a line of huffman-encoded image data
+;Returns C set on error, Z on EOF
+	dbgmsg  'HUFFLINE - Entered routine'
+a1:     call    getcode ;get the next code from input stream
+	errchk  >e1     ;quit on error or done
+	call    huffout ;build PCL output
+	errchk  >e2     ;quit on error
+	jmp     near a1 ;loop till ERRCHK pulls us out
+a3:     jmp     eolproc ;finish up the line and send it
+e1:     je      >e3     ;special check on EOL
+	jnc     ret     ;return if no problem
+	pop     ax      ;toss the return address
+	ret
+e2:     jnc     ret     ;return if no error
+	print   'Error - Aborting Huffman decode process'
+	pop     ax      ;trash the return address
+	ret
+e3:     pop     ax      ;don't return in any case
+	mov     ax,thisbyte ;did we go anywhere?
+	or      ax,ax   ;check...
+	jne     a3      ;continue if so
+	ret             ;else return with Z set to indicate EOF
+;
+getcode:
+;The Huffman search engine, taken from my PDP-11 routine. Since MOVs in
+; Intel-land don't set any bits, we'll have to test using OR.
+	dbgmsg  'GETCODE -- Entered routine'
+	call    newcode ;get first nonzero bit
+	errchk  >e1     ;return if EOL or I/O error
+	mov     bx,color ;get current color 0=white, 2=black
+	mov     bx,hufftbl[bx] ;now point to table for that color
+a1:     xor     ax,ax   ;clear before OR
+	or      ax,[bx] ;get next code from table
+	errchk  >e2     ;check if null (end of table)
+	jns     >a2     ;continue if positive
+	neg     ax      ;otherwise force it positive
+	mov     codsiz,ax ;save it, it's the current codesize
+	mov     cx,[bx+2] ;pointer to next size in CX
+	add     bx,4    ;skip to next table entry
+	jmp     near a1 ;loop
+a2:     mov     si,[bx+2] ;store pelstring length
+	add     bx,4    ;advance pointer to next entry
+a3:     mov     dx,codlen
+	cmp     codsiz,dx ;up to length extracted from file?
+	je      >a4     ;continue if so
+	ja      >a5     ;skip ahead if more, we need to extract more
+	mov     bx,cx   ;else get pointer to next size
+	jmp     near a1 ;loop back around
+a4:     cmp     ax,thiscode ;does table entry match extracted code?
+	jne     a1      ;loop if not
+	mov     bx,color ;save color before updating
+	xor     ax,ax   ;clear before OR
+	or      ax,si   ;get pelstring length into AX to return
+	errchk  >e3     ;adjust if negative
+	ret     ;with size in AX and color in BX
+a5:     call    inccode ;merge another bit onto the code
+	errchk  >e4     ;abort on error
+	jmp     near a3 ;else loop
+e1:;test if NEWCODE returned Z set (for EOL) or C set (EOF)
+	ja      ret     ;return if neither
+	pop     ax      ;else junk the return address
+	ret
+e2:;see if end of table reached
+	jne     ret     ;return if nonzero
+	print   'Error - Code not found in Huffman table'
+	pop     ax      ;junk the return address
+	ret
+e3:;adjust size word if negative, new color if not
+	jl      >e9   ;skip if make-up code
+	mov     cx,black ;else adjust color
+	xor     color,cx ;toggles to opposite, clears carry
+	or      cx,cx   ;clear Z flag
+	ret
+e4:     jnc     ret     ;continue if no error
+	pop     ax      ;trash the return address
+	ret
+e9:     neg     ax      ;make pelstring length positive
+	or      ax,ax   ;clear carry
+	ret
+;
+huffout:
+;produce PCL output for the run just decoded
+;Length is in AX, color in BX, buffer is initialized to white (zeroes)
+;PCL bit image data shows the MSB to the left of the page, bytes shown
+; in right-to-left order
+	dbgmsg  'HUFFOUT - Entered routine'
+	or      ax,ax   ;is length zero?
+	je      ret     ;if so, nothing to do
+	mov     si,thisbyte ;get pointer into decode line
+	mov     dx,thisbit ;get bit-in-byte currently being used
+	mov     cx,ax   ;length becomes loop count
+	mov     ax,thisline ;address of current decode line
+	xchg    ax,bx   ;put that in BX, color in AX
+	or      ax,ax   ;see if white...
+	je      >a5     ;skip if so, just adjust pointers
+a1:     cmp     si,width ;are we at the end of the buffer?
+	jc      >a2     ;continue if not
+	print   'ERROR - Black string from Huffman code overflows the buffer'
+	stc     ;set carry flag
+	ret
+a2:     or      [bx+si],dl ;set the current bit in current byte
+	shr     dl,1    ;rotate to next pixel position    
+	errchk  >e3     ;adjust if it went off the deep end
+	loop    a1      ;continue for count in CX
+;here when CX is exhausted
+	mov     thisbit,dx ;save bit pointer...
+	mov     thisbyte,si ;byte pointer...
+	or      dl,dl   ;clear carry and Z flags
+	ret
+a5:     
+;skips directly to here if white, nothing to paint so just adjust pointers
+	mov     ax,cx   ;get count back into AX
+	mov     cx,8    ;divide by 8 to get byte count
+	xor     dx,dx   ;remainder goes into DL
+	div     cx      ;AX/CX
+	add     thisbyte,ax ;add byte count to pointer
+	mov     ax,width ;check for overflow
+	cmp     ax,thisbyte ;...
+	errchk  >e7     ;...
+	mov     ax,thisbit ;get current bit
+	mov     cx,dx   ;get remainder into count word
+	or      cx,cx   ;see if we have to shift at all
+	je      >a7     ;skip if not
+a6:     shr     al,1      ;shift right one bit at a time...
+	errchk  >e6     ;if it goes out of bit zero, adjust the pointer
+	loop    a6      ;loop for count in CX
+a7:     mov     thisbit,ax ;store new bit pointer
+	or      al,al   ;clear carry and Z flags
+	ret
+e3:     jnc     ret     ;just continue if bit is still in bounds
+	mov     dl,80h  ;refresh the bit pointer
+	inc     si      ;update the byte pointer
+	ret     ;continue processing till stopped by CX count
+e6:     jnc     ret     ;continue if bit didn't drop off
+	inc     thisbyte ;otherwise advance pointer
+	mov     al,80h   ;refresh bit pointer
+	ret
+e7:     jnc     ret     ;return if within image width boundary
+	print   'ERROR - White string from HUFFMAN code overflows the buffer'
+	pop     ax      ;trash the return address
+	ret     ;to previous caller
