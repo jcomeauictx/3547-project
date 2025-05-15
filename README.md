@@ -1,5 +1,7 @@
 # The 3547 Automation Project
 
+(From <http://jc.unternet.net/awards/?1996-01-26-01>)
+
 Photocopiers, templates, and papercutters. That's how ACR (Address Correction
 Requested) mail was processed before Fred Hernandez of the Fort Lauderdale
 Post Office came along and got Tony Hawkins involved in what was to become
