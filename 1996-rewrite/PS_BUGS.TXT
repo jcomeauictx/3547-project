@@ -1,0 +1,34 @@
+These are the bugs and presumed bugs that I have found in the PostScript
+interpreter of the XEROX 4520 printer.
+
+* The _image_ operator produces no output on _showpage_ unless there is also
+  some non-raster graphics on the page. (No error message, just goes back to
+  "Online Ready"
+
+* Certain _ioerror_ faults cause the interpreter to ignore all further input
+  even though the error page has printed out and the display shows "Online
+  Ready". This can be easily reproduced by putting insufficient hex data
+  in an _image_ stream.
+
+* A "timeout" error occurs after sitting for a few minutes unused. The error
+  message prints out even if error reports are disabled.
+
+* Once in "Power Save" mode it will not come out of sleep when data is sent
+  to it. Even in PCL mode it takes a long time (a minute or more) but does
+  eventually wake up. It should be programmed to initiate wakeup procedures
+  as soon as the first byte is received.
+
+* The following binary characters, when embedded in a data stream for use
+  with the _image_, _readstring_, _filter_, or other binary operators, are
+  trapped and executed as instructions:
+  03h ^C, executes _interrupt_
+  04h ^D, treated as EOD, after which the rest of the binary data stream is
+    scanned for a PostScript command, forcing _limitcheck_
+  11h,13h,14h ^Q,^S,^T each cause the scanner to "backspace", overreading
+    into the following PostScript command.
+
+  On page 74 of the Red Book, 2nd edition, "Control Codes are device dependent
+  and not part of the PostScript language." Yet it is not a communications
+  protocol intercepting these characters, but the PostScript interpreter
+  itself. If it is desired to trap ^C to allow unscheduled termination of
+  a print job, this should be disabled while scanning raw binary data.

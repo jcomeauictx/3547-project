@@ -1,0 +1,208 @@
+;PRINTIMG.A86 - Print image captured from WABCR
+; usage: PRINTIMG TEST.IMG PRN
+debug=0
+bpp=4   ;4 or 8... 4 for speed, 8 for quality
+hexified=1
+compressing=1 ;set to 1 when bugs are out
+;
+readbfsize=4000h
+writebfsize=4000h
+inhandle dw     stdin
+outhandle dw    stdout
+newdta  db      43 dup (?)
+odd_even db 0   ;1 for odd, 0 for even
+iosb:   dw      0
+width dw   ?
+height dw  256
+#if hexified
+hexbuf: dw  1536 dup (?) ;two bytes hex data for every byte binary
+#endif
+argv    dw      0,0, 0,0, 0,0 ;descriptors for 2 args
+;
+main:   initbf  readbf,readbfsize ;zero out read buffer
+	initbf  writebf,writebfsize ;also write buffer
+	getargs 3,#'offset argv'
+	mov     ax,argv+4 ;check for nonzero second arg
+	or      ax,ax
+	errchk  >e4     ;quit if input and output not found
+	mov     bx,offset newdta
+	find    argv+2,bx
+s1:     call    >e1     ;abort on error
+	mov     dx,dta_filesize+2[bx]
+	mov     ax,dta_filesize[bx]
+	div     height
+	mov     width,ax
+	lea     bx,dta_filename[bx]
+	open    #'offset inhandle',bx,'read'
+	errchk  >e1
+	open    #'offset outhandle',argv+6,'write'
+	errchk  >e7
+	#if !hexified
+	call    setbinary ;raw mode in case it's a printer or console
+	#endif ;!hexified
+	fprintf stderr,'Converting file %s...\n',bx
+;let batch file do the moveto
+	mov     di,bx   ;first find lsb of number, odd=bottom, even=top
+	mov     al,'.'  ;scan to extension
+	mov     cx,9    ;max possible
+	repnz   scasb   ;look for it
+	errchk  >e5     ;quit on error
+	mov     al,[di-2] ;get the final filename char
+	and     al,1    ;only low bit matters
+	mov     odd_even,al ;store it for later
+	jz      >s2     ;skip if even
+	fprintf outhandle,'gsave 12 36 translate\n'
+	errchk  >e2
+	jmp     >s3     ;skip even-numbered initialization
+s2:     fprintf outhandle,'gsave 12 432 translate\n' ;top half of page
+	errchk  >e2
+s3:     fprintf outhandle,'%d 2 div %d scale\n',width,height ;half the X
+	errchk  >e2
+	#if !hexified
+	fprintf outhandle,'/pixstr 256 string def\n'
+	#endif
+	fprintf outhandle,'%d %d %d [%d 0 0 %d 0 0]\n',width,height,bpp,width,height
+	errchk  >e2
+	#if hexified OR compressing
+	fprintf outhandle,'currentfile\n' 
+	errchk  >e2
+	#endif
+	#if hexified AND !compressing
+	fprintf outhandle,'/ASCIIHexDecode filter\n'
+	errchk  >e2
+	#elseif hexified AND compressing
+	fprintf outhandle,'/ASCIIHexDecode filter /RunLengthDecode filter\n'
+	errchk  >e2
+	#elseif compressing AND !hexified
+	fprintf outhandle,'/RunLengthDecode filter\n'
+	errchk  >e2
+	#elseif !compressing and !hexified
+	fprintf outhandle,'{currentfile pixstr readstring pop}\n'
+	#endif  ;hexified AND !compressing
+	fprintf outhandle,'image ' 
+	errchk  >e2
+;if binary mode, must be one and only one whitespace after "image" statement        
+	#if hexified
+	fprintf outhandle,'\n'
+	errchk  >e2
+	#endif  ;hexified
+r_loop: read    inhandle,inbuffer,width,iosb,readbf
+	errchk  >e3
+	jz      >r2
+	call    lineout
+	errchk  >e2     ;abort on error
+	jmp     r_loop
+	ret     ;exit
+r2:     #if hexified AND !compressing ;mark EOD with right angle bracket
+	fprintf outhandle,'>'
+	errchk  >e2
+	#elseif hexified AND compressing ;mark EOD with 80h, hexified
+	fprintf outhandle,'80>'
+	errchk  >e2
+	#elseif compressing AND !hexified
+	fprintf outhandle,80h
+	errchk  >e2
+	#endif ;hexified
+	#if hexified
+	fprintf outhandle,'\ngrestore\n' ;mark end of Hex ASCII data
+	#else
+	fprintf outhandle,'grestore\n' ;don't need any whitespace before it
+	#endif
+	errchk  >e2
+	exit    #'w odd_even' ;indicate where to place the template
+e1:     jnc     ret
+	fprintf stderr,'Could not open %s\n',argv+2
+	exit    2
+e2:     jnc     ret
+	fprintf stderr,'Failure on WRITE of output file\n'
+	exit    3
+e3:     jnc     ret
+	fprintf stderr,'Failure on READ of input file\n'
+	exit    4
+e4:     jnz     ret     ;continue if filename was specified
+	fprintf stderr,'Both input and output filenames must be specified\n'
+	exit    5
+e5:     jz      ret     ;OK if dot was found
+	fprintf stderr,'Filename buffer is scrambled, cannot continue\n'
+	exit    6
+e7:     jnc     ret
+	fprintf stderr,'Could not open %s\n',argv+6
+	exit    7
+lineout: 
+	mov     cx,width ;copy width, it gets updated by HEXDUMP
+	#if compressing
+	 #if bpp eq 4
+	 call   reduce_resolution
+	 #endif ;bpp eq 4
+	packbits inbuffer,cx
+	#endif ;compressing
+	#if hexified
+	hexdump inbuffer,cx,hexbuf
+	 #if (bpp eq 4) AND !compressing ;reduce resolution? (in hexify mode)
+	call    reduce_resolution ;make 4 bpp by chopping low hex digit
+	 #endif ;bpp eq 4 AND !compressing
+	mov     dx,offset hexbuf
+	mov     bx,78   ;max output string length
+s1:     cmp     cx,bx   ;enough chars left?
+	errchk  >e1     ;adjust if not
+	write   outhandle,dx,bx,iosb,writebf
+	fprintf outhandle,'\n' ;add CRLF
+	add     dx,bx   ;advance pointer
+	sub     cx,bx   ;loop till done
+	jz      ret     ;return if done, else loop
+	jmp     s1      ;...
+	#else   ;not hexified, just write raw data as we read it in
+	write   outhandle,inbuffer,cx,iosb,writebf
+	#endif ;hexified
+	ret
+e1:     jnc     ret     ;continue if more
+	mov     bx,cx   ;make count = what's left
+	ret
+setbinary:
+;set raw output mode, ignore any errors
+	call    saval   ;don't mess with registers
+	mov     ax,4400h ;get device data
+	mov     bx,outhandle ;get handle back
+	int     dos     ;request the device data
+	or      dl,20h  ;set "raw" bit
+	jns     ret     ;return if bit 7 not set (disk file)
+	xor     dh,dh   ;shouldn't have to, but fails otherwise under DOS5
+	mov     ax,4401h ;set device data
+	int     dos     ;do it...
+	ret
+reduce_resolution:
+	#if hexified and !compressing
+	mov     si,offset hexbuf ;point both to same buffer
+	mov     di,si
+	shr     cx,1    ;use original width
+	mov     dx,cx   ;save it
+c1:     lodsw   ;get two bytes, low is actually the MSBs
+	stosb   ;so store only that
+	loop    c1      ;do the whole buffer
+	mov     cx,dx   ;restore count
+	and     cx,1    ;see if width is odd
+	mov     cx,dx   ;restore CX anyway
+	jz      ret     ;return if not odd
+	stosb   ;else duplicate final nybble
+	ret
+	#else ;if compressing to packbits format, binary or hex output
+;        dbgmsg  'packing bits\n'
+	mov     si,offset inbuffer
+	mov     di,si
+	shr     cx,1    ;divide length by 2
+	adc     cx,0    ;but add one if length was odd
+	mov     dx,cx   ;save length
+c1:     lodsb   ;get next byte
+	aam     16      ;split into nybbles, leaving high in AL
+	lodsb   ;get another byte, possibly garbage if already past EOD
+	shr     al,4    ;move high nybble into low
+	aad     16      ;merge into one byte, with left pixel in high nybble
+	stosb   ;store it, overwriting original data
+	loop    c1      ;repeat until done
+	mov     cx,dx   ;restore new count
+	ret
+	#endif ;hexified
+	buffer  ;init buffer area
+	buffer  inbuffer,256 ;set up line buffer
+	buffer  readbf,readbfsize,10 ;read buffer
+	buffer  writebf,writebfsize,10 ;write buffer

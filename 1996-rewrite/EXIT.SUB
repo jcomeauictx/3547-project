@@ -1,0 +1,17 @@
+;EXIT.A86 - Exit to DOS
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       EXIT    ERRORLEVEL
+; ERRORLEVEL is a byte value to be returned in the DOS variable ERRORLEVEL
+exit    macro
+        ##if !#s1
+        push    0
+        ##else
+        push    #1
+        ##endif
+        jmp     _exit
+        #em
+_exit:  pop     ax      ;get errorlevel
+        mov     ah,4ch  ;exit service
+        int     dos

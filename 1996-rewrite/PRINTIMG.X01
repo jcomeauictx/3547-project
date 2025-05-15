@@ -1,0 +1,83 @@
+debug=0
+;
+inhandle dw     stdin
+#if debug
+outhandle dw    stdout
+#else
+outhandle dw    stdprn
+#endif
+newdta  db      43 dup (?)
+imagefile db    '*.im?',0
+x       dw      10  ;cartesian coordinates
+y       dw      10
+iosb:   dw      0
+width dw   ?
+height dw  256
+hexbuf: dw  1536 dup (?) ;two bytes hex data for every byte binary
+;
+main:   mov     bx,offset newdta
+        find    #'offset imagefile',bx
+s1:     call    >e1     ;abort on error
+        mov     dx,dta_filesize+2[bx]
+        mov     ax,dta_filesize[bx]
+        div     height
+        mov     width,ax
+        lea     bx,dta_filename[bx]
+        fprintf stderr,'Converting file %s...\n',bx
+        open    #'offset inhandle',bx,'read'
+        errchk  >e1
+        fprintf outhandle,'%%!PS-Adobe 3.0\n'
+        errchk  >e2
+        fprintf outhandle,'/pixstr %d string def\n',width
+        errchk  >e2
+        fprintf outhandle,'0 0 moveto %d %d translate\n',x,y
+        errchk  >e2
+        fprintf outhandle,'%d 2 div %d scale\n',width,height ;half the X
+        errchk  >e2
+        fprintf outhandle,'%d %d 8 [%d 0 0 %d 0 0]\n',width,height,width,height
+        errchk  >e2
+        fprintf outhandle,'{currentfile pixstr readhexstring pop}\n'
+        errchk  >e2
+        fprintf outhandle,'image\n'
+        errchk  >e2
+r_loop: read    inhandle,inbuffer,width,iosb
+        errchk  >e3
+        jz      >r2
+        call    showline
+        errchk  >e2     ;abort on error
+        jmp     r_loop
+        ret     ;exit
+r2:     fprintf outhandle,'\nshowpage\n'
+        errchk  >e2
+        mov     bx,offset newdta ;use same DTA
+        find    0,bx     ;get next file
+        jmp     s1      ;loop to process it
+e1:     jnc     ret
+        mov     ax,4c00h
+        int     dos
+        ret
+e2:     jnc     ret
+        fprintf stderr,'Failure on WRITE of output file\n'
+        mov     ax,4c01h
+        int     dos
+e3:     jnc     ret
+        fprintf stderr,'Failure on READ of input file\n'
+        mov     ax,4c02h
+        int     dos
+showline: 
+        mov     cx,width ;copy width, it gets updated by HEXDUMP
+        hexdump inbuffer,cx,hexbuf
+        mov     dx,offset hexbuf
+        mov     bx,78   ;max output string length
+s1:     cmp     cx,bx   ;enough chars left?
+        errchk  >e1     ;adjust if not
+        write   outhandle,dx,bx,iosb
+        fprintf outhandle,'\n' ;add CRLF
+        add     dx,bx   ;advance pointer
+        sub     cx,bx   ;loop till done
+        jne     s1      ;...
+        ret
+e1:     jnc     ret     ;continue if more
+        mov     bx,cx   ;make count = what's left
+        ret
+inbuffer: end

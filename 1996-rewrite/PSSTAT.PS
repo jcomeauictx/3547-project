@@ -1,0 +1,196 @@
+0 /native exch def % Change to 1 to Print Each Font in its Native TypeFace
+
+/font {findfont exch scalefont setfont} bind def
+/box {1 index 0 rlineto 0 exch rlineto neg 0 rlineto closepath} bind def
+/tab {currentpoint exch pop leftmargin 144 add exch moveto} def
+
+/nl {
+  currentpoint leftmargin exch ptsize sub moveto
+  currentpoint exch pop bottommargin le {
+    /leftmargin leftmargin columnwidth add def
+    leftmargin topmargin moveto
+  } if
+} def
+
+/sshow {s cvs show} def
+/tshow {tab sshow nl} def
+
+/printerinfo {
+  statusdict begin
+    /printername where {pop (Printer Name) show 64 string printername tshow} if
+    /product where {pop (Product) show product tshow} if
+    /version where {pop (Version) show version tshow} if
+    /revision where {pop (Revision) show revision tshow} if
+    /languagelevel where {pop (Language Level) show languagelevel tshow} if
+    nl
+  end
+} def
+
+/otherinfo {
+  72 72 matrix defaultmatrix
+  dtransform
+  /hres exch round abs cvi def
+  /vres exch round abs cvi def
+  /eres vres hres mul sqrt cvi def
+
+  vres hres eq {
+    (Device Resolution:) show tab hres sshow ( dpi) show nl
+  }{
+    (Horizontal Resolution:) show tab hres sshow ( dpi) show nl
+    (Vertical Resolution:) show tab vres sshow ( dpi) show nl
+    (Effective Resolution:) show tab eres sshow ( dpi) show nl
+  } ifelse
+ nl
+
+ /height y2 y1 sub def
+ /width x2 x1 sub def
+ (Left Margin) show tab x1 sshow (, ) show
+ x1 72 div sshow ( in.) show nl
+ (Bottom Margin) show tab y1 sshow (, ) show
+ y1 72 div sshow ( in.) show nl
+ (Imageable Height) show tab height sshow (, ) show
+ height 72 div sshow ( in.) show nl
+ (Imageable Width) show tab width sshow (, ) show
+ width 72 div sshow ( in.) show nl
+} def
+
+/colorinfo {
+  /color systemdict /currentcolorscreen known def
+  (Device Type:) show tab
+  color {(Color)}{(Black & White)} ifelse
+  show nl
+
+ color {
+   /rlevels 1 def
+   /glevels 1 def
+   /blevels 1 def
+   /klevels 1 def
+
+ gsave
+   currentcolorscreen
+     pop /kangle exch def /kfreq exch def
+     pop /gangle exch def /gfreq exch def
+     pop /bangle exch def /bfreq exch def
+     pop /rangle exch def /rfreq exch def
+
+     rfreq rangle {pop pop /rlevels dup load 1 add def 1}
+     gfreq gangle {pop pop /glevels dup load 1 add def 1}
+     bfreq bangle {pop pop /blevels dup load 1 add def 1}
+     kfreq kangle {pop pop /klevels dup load 1 add def 1}
+   setcolorscreen
+ grestore
+
+     (Red Screen frequency: ) show rfreq tshow
+     (Green Screen frequency: ) show gfreq tshow
+     (Blue Screen frequency: ) show bfreq tshow
+     (Black Screen frequency: ) show kfreq tshow
+     (Red Screen angle: ) show rangle tshow
+     (Green Screen angle: ) show gangle tshow
+     (Blue Screen angle: ) show bangle tshow
+     (Black Screen angle: ) show kangle tshow
+     (Number of Shades Red: ) show rlevels tshow
+     (Number of Shades Green: ) show glevels tshow
+     (Number of Shades Blue: ) show blevels tshow
+     (Number of Shades Gray: ) show klevels tshow
+     (Number of Shades Possible: ) show
+     rlevels glevels mul blevels mul tshow
+}
+{  /klevels 1 def
+  gsave
+     currentscreen pop /kangle exch def /kfreq exch def
+     kfreq kangle {pop pop /klevels dup load 1 add def 1} setscreen
+  grestore
+
+     (Black Screen frequency: ) show kfreq tshow
+     (Black Screen angle: ) show kangle tshow
+     (Number of Shades of Gray: ) show klevels tshow
+  } ifelse
+ nl
+} def
+
+/memoryinfo {
+  vmstatus
+  dup
+  3 -1 roll
+  sub sshow ( of ) show
+  sshow ( Bytes Remaining) show nl nl
+  pop
+} def
+
+/bubblesort {
+ /v exch def
+ /n v length 1 sub def
+
+ n -1 1 {
+   /i exch def
+   0 1 i 1 sub {
+     /j exch def
+     /t1 v j get def
+     /t2 v j 1 add get def
+     t1 t2 gt
+       {
+         v j t2 put 
+         v j 1 add t1 put
+       } if
+     } for
+  } for
+} def
+
+% hacked to NOT show fontname in its own font style if it's a downloaded font
+% after the program barfed on some buggy fonts JLC
+/fontinfo {
+  /fontarray [ FontDirectory {pop 128 string cvs} forall ] def
+  fontarray bubblesort
+  fontarray length sshow ( Fonts Available:) show nl
+  fontarray {
+    /fontname exch def
+    gsave
+      FontDirectory fontname cvn get
+      /FontType get 3 ne { % only use the font if it's not downloaded
+        native 0 ne {
+          ptsize fontname cvn font
+        } if
+      } if
+      fontname show
+      FontDirectory fontname cvn get
+      /FontType get 3 eq {(*) show} if
+    grestore
+    nl
+  } forall
+  nl
+  (* = DownLoaded Font) show nl
+  nl
+} def
+
+gsave
+  initgraphics
+  clippath
+  pathbbox
+  /y2 exch def
+  /x2 exch def
+  /y1 exch def
+  /x1 exch def
+grestore
+
+/ptsize 10 def
+/s 128 string def
+/columnwidth 220 def
+/topmargin y2 ptsize sub 5 sub def
+/leftmargin x1 5 add def
+/bottommargin y1 10 add def
+
+ptsize /Times-Roman font
+
+newpath
+x1 y1 moveto
+x2 y2 box
+stroke
+
+leftmargin topmargin moveto
+printerinfo
+otherinfo
+colorinfo
+memoryinfo
+fontinfo
+showpage
+

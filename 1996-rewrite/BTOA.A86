@@ -1,0 +1,169 @@
+;btoa.a86 - ASCII85 encoder
+;uses formula from p.129 of Adobe Red Book, 2nd edition
+inhandle dw     stdin
+outhandle dw    stdout
+eod_marker: db  '~>'
+debug=0 ;for trying to figure out why it's so damned SLOW
+;yep, it's the DOCHAR routines, all right!
+fast=1  ;first attempt at making it run faster
+argv    dw      0,0, 0,0, 0,0
+iniosb  dw      0
+outiosb dw      0
+#if !fast ;half-fast...
+table   dd      52200625,614125,7225,85,0 ;digit values of base-85 numbers
+#else   
+;speed factor of 5 or 6 would be best
+table   dd      1670420000,19652000,7225,85,0 ;high digits shifted by 5
+#endif
+main:   getargs 3,#'offset argv'
+        mov     ax,argv ;see if an input file was specified
+        call    >s6     ;open it if so
+        errchk  >e5     ;quit if failed
+        mov     ax,argv+4 ;see if an output file was specified
+        call    >s8     ;open if so
+        errchk  >e6     ;quit if failed
+s1:     mov     si,offset inbuffer
+        mov     di,offset outbuffer
+        get     inhandle,si,4000h,#'offset iniosb'
+        errchk  >e1     ;quit on read error
+        test    iniosb,-1 ;see if we got anything
+        errchk  >e2     ;exit if EOF
+s2:     mov     cx,4    ;using 4 at a time
+        sub     iniosb,cx ;reduce count by 4
+        call    >s5     ;pad if less than 4 chars
+        jc      >s3     ;if nothing was there, try to get more
+        lodsw   ;get next two bytes
+        mov     dx,ax   ;copy into DX
+        xchg    dh,dl   ;swap bytes
+        lodsw   ;next two bytes
+        xchg    ah,al   ;swap bytes
+        mov     bp,offset table ;BP to division table
+        mov     bx,ax   ;see if all zeroes
+        or      bx,dx   ;...
+        jnz     >s4     ;skip if not
+        cmp     cx,4    ;was it padded?
+        jnz     >s4     ;skip if so
+        mov     al,'z' ;single 'z' replaces "!!!!!"
+        stosb
+        jmp     s2      ;loop back around
+s3:     sub     di,offset outbuffer ;get count to send
+        put     outhandle,#'offset outbuffer',di,#'offset outiosb'
+        errchk  >e4     ;quit on error
+        jmp     s1      ;initialize registers and get more input
+s4:     call    dochars ;repeatedly subtract, and output translated chars
+        sub     cx,4    ;4 input chars yield 5 output; 3 yield 4, etc...
+        add     di,cx   ;this adjusts accordingly
+        jmp     s2      ;loop back around to top
+s5:     jae     ret     ;continue if not
+        cmp     iniosb,-3 ;empty tank (-4)?
+        jc      ret     ;if so, try to get more
+        call    saval   ;don't mess with the registers, C flag now clear
+        mov     bx,cx   ;BX <= 4
+        mov     cx,iniosb ;make CX=4-the number of bytes available
+        neg     cx      ;...
+        add     iniosb,cx ;zero out the count for next time
+        sub     bx,cx   ;count of bytes to skip (already occupied)
+        xchg    si,di   ;make DI point to the input buffer
+        add     di,bx   ;point past last byte returned
+        xor     al,al   ;clear byte to store
+        rep     stosb   ;pad to end of buffer, using count in CX
+        mov     saval_cx[bp],bx ;reflect # remaining chars in CX on return
+        ret
+s6:     or      ax,ax   ;see if anything is there
+        jz      ret     ;just go back if not
+        open    #'offset inhandle',argv+2,'read'
+        ret
+s8:     or      ax,ax   ;check for output filespec
+        jz      ret     ;return if not there
+        open    #'offset outhandle',argv+6,'write'
+        ret
+;
+e1:     jnc     ret     ;now is where we quit on error
+        printf  'Failed on READ of input file\n'
+        exit    1       ;errorlevel 2
+e2:     jnz     ret     ;continue if GET was successful
+        put     outhandle,#'offset eod_marker',2,#'offset outiosb'
+        mov     ax,0    ;exit errorlevel
+        adc     ax,0    ;make 1 if WRITE failed
+        shl     ax,1    ;now make it 2 to distinguish from read error
+        exit    ax      ;exit to DOS
+e4:     jnc     ret     ;continue if no error
+        printf  'Failed on WRITE of output file\n'
+        exit    4       ;otherwise quit
+e5:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+2
+        exit    5       ;failure on input file OPEN
+e6:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+6
+        exit    6       ;failure on output file OPEN
+dochars:
+        mov     bx,'!!' ;for initializing output
+        mov     [di],bx ;first word...
+        mov     [di+2],bx ;2nd
+        mov     [di+4],bl ;final odd byte
+        #if debug
+        add     di,5    ;just position the output pointer and go home
+        ret
+        #endif
+        call    dochar  ;do the first two the slow way...
+        call    dochar  ;repeated subtraction
+        xor     bx,bx   ;clear BX to use as zero
+        call    qdochar ;then use DIV
+        call    qdochar
+        add     [di],al ;then finish off with ones digit
+        inc     di      ;advance pointer
+        ret
+dochar:
+#if !fast
+d1:     sub     ax,[bp] ;subtract low word first
+        sbb     dx,[bp+2] ;then high word
+        errchk  >e1     ;abort on borrow out
+        inc     b[di]   ;else adjust value
+        jmp     d1      ;loop
+e1:     jnb     ret     ;continue if no borrow out of high word
+        add     sp,2    ;else trash DOCHAR return address
+        add     ax,[bp] ;else set back to where it was
+        adc     dx,[bp+2] ;...
+        inc     di      ;advance pointer to next location
+        add     bp,4    ;next table entry
+        ret
+#else
+        push    cx      ;we need count register
+        sub     sp,4    ;now make temp space on stack
+        mov     bx,sp   ;get pointer to it
+        mov     [bx],[bp] ;load shifted digit value into temp
+        mov     [bx+2],[bp+2] ;...
+        mov     cx,(1 SHL 5) by 5 ;CH is 2 to the nth, cl is n
+d2:     sub     ax,[bx] ;subtract low word first
+        sbb     dx,[bx+2] ;then high word
+        call    >d3     ;adjust on borrow out
+        add     b[di],ch ;else increment value
+        jmp     d2      ;loop
+d3:     jnb     ret     ;continue if no borrow out of high word
+        add     sp,2    ;else trash return address
+        add     ax,[bx] ;set back to where it was
+        adc     dx,[bx+2] ;...
+        shr     ch,1    ;move everything over 1
+        shr     w[bx+2],1  ;...move everything over 1
+        rcr     w[bx],1    ;include bit shifted out of high word
+        dec     cl      ;when it's zero, we're done this digit
+        jns     d2      ;loop if not
+        inc     di      ;advance pointer to next location
+        add     bp,4    ;next table entry
+        add     sp,4    ;throw away temp space
+        pop     cx      ;restore count register
+        ret
+#endif ;fast
+qdochar:
+        div     w[bp]   ;divide DX:AX by [BP], q in AX, r in DX
+        add     [di],al ;adjust value of the byte
+        mov     ax,dx   ;move remainder into low word
+        mov     dx,bx   ;zero out the high word
+        inc     di      ;next location
+        add     bp,4    ;next table entry
+        ret
+;
+;now define buffer space in no-mans-land between here and stack        
+        buffer
+        buffer  inbuffer,4000h
+        buffer  outbuffer,5000h

@@ -1,0 +1,46 @@
+;PUT.A86 - unbuffered write subroutine and macro
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       PUT     HANDLE,BUFFER,LENGTH,IOSB
+; HANDLE is file handle of the opened file.
+; BUFFER is the pointer to the data record.
+; LENGTH is the 16-bit size of the record being written.
+; IOSB is the address of the I/O status block (16 bits)
+put     macro
+        push    #1,#2,#3,#4 ;if you call with offset, use #'offset buffer'
+        call    _put
+        push    offset >m1
+        ret     8       ;clear stack
+m1:     #em
+;
+_put:   and     b[0],0ffh ;clear flags
+        call    saval   ;save registers
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     cx,2[bx] ;length into CX
+        mov     dx,4[bx] ;buffer address
+        call    >w1     ;see if string needs counting
+        push    [bx]   ;address of status word
+        mov     bx,6[bx] ;handle
+        mov     ah,40h  ;DOS service
+        int     dos     ;call it...
+        pop     bx      ;get status block address
+        mov     [bx],ax ;save count returned or error code
+        errchk  >e1     ;set carry on error
+        cmp     ax,cx   ;set carry if not all the record was written
+        errchk  >e1     ;...
+;DOS doesn't do this, but in most applications this would indicate a serious
+;enough error to warrant handling.
+        ret
+w1:     cmp     cx,-1   ;check if we need to count string
+        jne     ret     ;continue if string already counted
+        mov     di,dx   ;get buffer address into string register
+        xor     al,al   ;searching for null
+        repnz   scasb   ;...
+        jnz     ret     ;zero if null not found
+        not     cx      ;stringlength+1...
+        dec     cx      ;stringlength
+        ret     ;use it
+e1:     jnc     ret     ;continue if no error
+        or      w saval_flags[bp],carry
+        ret

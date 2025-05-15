@@ -1,0 +1,111 @@
+;READ.A86 - Read subroutine and macro
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       READ    HANDLE,USRBUF,LENGTH,IOSB,READBUFFER
+read_handle=8 ; HANDLE is file handle of the opened file.
+read_userbuf=6 ; USRBUF is the buffer in which to copy the input
+read_length=4 ; LENGTH is the 16-bit size of the record being read.
+read_iosb=2 ; IOSB gets the error code, or length read when successful
+read_buffer=0 ; READBUFFER is the pointer to a structure: 
+buffer_length=0 ;length of the following buffer
+buffer_contents=2 ;number of unused bytes currently in the buffer
+buffer_pointer=4 ;pointer to next unused byte
+buffer_iosb=6 ;I/O status word for the buffer
+buffer_loc=8 ;memory location of the buffer
+;
+buffer  macro   ;set up buffer space at end of program
+        ##if !#s1 ;with no args, just init pointer
+        _bufferpointer=$
+        ##else
+        #1=_bufferpointer
+        _bufferpointer=_bufferpointer+#2
+        ##if #s3 ;3rd arg is structure area
+        _bufferpointer=_bufferpointer+#3
+        ##endif
+        ##endif
+        #em
+;
+initbf  macro
+        push    #1,#2   ;location,size
+        call    _initbuffer ;initialize the structure
+        push    offset >m1
+        ret     4
+m1:     #em
+;
+read    macro
+        push    #1,#2,#3,#4,#5 ;if you call with offset, use #'offset buffer'
+        call    _read
+        push    offset >m1 ;so we can clean up stack without affecting flags
+        ret     10      ;stack is clear
+m1:     #em
+        ret
+_read:  and     b[0],0ffh ;clear flags        
+        call    saval   ;save all registers
+        call    >r9     ;extract args
+        or      cx,cx   ;anything to do? (also clears carry)
+        jz      ret     ;return if not
+        cmp     buffer_contents[di],cx ;do we already have the requested bytes?
+        jae     >r1     ;copy data and return, if so
+        mov     si,buffer_pointer[di] ;get pointer to next byte
+        mov     cx,buffer_contents[di] ;number of bytes still in the buffer
+        push    di      ;save struct address
+        mov     di,buffer_loc[di] ;pointer to start of buffer
+        rep     movsb   ;store the remainder of the buffer up front
+        pop     di      ;get struct address back
+        mov     bx,read_handle[bx] ;get handle where it belongs
+        mov     cx,buffer_length[di] ;get buffer length
+        sub     cx,buffer_contents[di] ;subtract leading bytes
+        mov     dx,buffer_loc[di] ;buffer address
+        mov     buffer_pointer[di],dx ;set pointer
+        add     dx,buffer_contents[di] ;adjust upwards
+;remember, even though we are reading new data into the buffer PAST where the        
+;previous data ended, the pointer is still at the start of the buffer because
+;we haven't yet moved any of that into the user buffer.
+        mov     ah,3fh  ;DOS service
+        int     dos     ;call it...
+        mov     buffer_iosb[di],ax ;store error code in buffer IOSB
+        errchk  >e1     ;trap any error
+        add     buffer_contents[di],ax ;update buffer contents count
+        call    >r9     ;get args back
+        cmp     buffer_contents[di],cx ;do we now have what was requested?
+        jae     >r1     ;continue if so
+        mov     cx,buffer_contents[di] ;if at first you can't succeed...
+                ;...lower your expectations
+r1:     mov     [si],cx ;store count in IOSB
+        push    cx      ;save on stack too
+        mov     si,buffer_pointer[di] ;source=read buffer
+        xchg    di,dx   ;dest=user buffer
+        rep     movsb   ;copy requested bytes into user buffer        
+        pop     cx      ;restore count
+        xchg    dx,di   ;get pointer back    
+        add     buffer_pointer[di],cx ;update pointer
+        sub     buffer_contents[di],cx ;update count
+        ret
+r9:     lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     cx,read_length[bx] ;length into CX
+        mov     di,read_buffer[bx] ;struct address
+        mov     dx,read_userbuf[bx] ;pointer to user buffer
+        mov     si,read_iosb[bx] ;get handle
+        ret
+e1:     jnc     ret     ;continue if no error
+        or      w saval_flags[bp],carry ;set carry on return
+        call    r9      ;get args back
+        mov     bx,read_iosb[bx] ;get IOSB address
+        mov     [bx],ax ;copy error into read IOSB
+        mov     buffer_pointer[di],buffer_loc[di] ;reinit buffer pointer
+        mov     w buffer_contents[di],0 ;init count
+        pop     ax      ;don't return
+        ret     ;to SAVAL
+;initialize a buffer structure: length, contents, pointer, iosb, location
+_initbuffer:
+        call    savgen  ;save general registers
+        lea     bx,savgen_retaddr+2[bp]
+        mov     ax,[bx] ;length
+        mov     bx,2[bx] ;location
+        mov     buffer_length[bx],ax ;store length
+        mov     buffer_loc[bx],bx ;location...
+        add     w buffer_loc[bx],10 ;is past this structure
+        mov     w buffer_contents[bx],0 ;zero out contents
+        mov     buffer_pointer[bx],buffer_loc[bx] ;pointer=location
+        ret     ;iosb doesn't matter

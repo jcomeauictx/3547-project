@@ -1,0 +1,108 @@
+;GETARGS.A86 - Parse command string into descriptor array
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       GETARGS HOWMANY,DESCR_ARRAY     or
+;       GETARGS CMDSTRING,HOWMANY,DESCR_ARRAY
+; CMDSTRING is a pointer to the command to be parsed, 80h by default
+;  The string will be expected to have a count byte in the first cell
+; HOWMANY is # of expected args, +1 in case of appended comment
+; DESCR_ARRAY is a table with (HOWMANY*2) words, in which will be stored
+;  string descriptors in the form [LENGTH][POINTER], where each are 16-bit
+;  integers.
+; As a side effect, the parsed strings will be null-terminated.
+getargs macro
+        ##if #nl eq 3
+        push    #1,#2,#3
+        ##else
+        push    80h,#1,#2 ;default location of command line
+        ##endif
+        call    _getargs
+        push    offset >m1
+        ret     6       ;clear stack
+m1:
+        #em
+_getargs:
+        call    saval  ;save all registers
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     si,4[bx] ;command string location
+        mov     dx,2[bx] ;number of expected args+1
+        or      dx,dx   ;any space allocated?
+        jz      ret     ;quit if not
+        mov     di,[bx] ;pointer to descriptor array
+        xor     cx,cx   ;clear count word
+        mov     ah,ch   ;clear comparison char
+        call    getargs_clear_array ;wipe out the array first
+        or      cl,b[si] ;get count from command line leading byte
+        jz      ret     ;quit if empty
+        inc     si      ;move to first command byte
+        xor     bx,bx   ;state=0, looking for non-whitespace
+getargs_loop:        
+        lodsb   ;get next byte from command line
+        call    getargs_dispatch[bx] ;call routine depending on current state
+        loopnz  getargs_loop ;loop until chars run out or Z set
+        mov     b[si],ch ;null out command line terminator
+        ret     ;return to caller with modified array
+getargs_dispatch dw getargs0,getargs2,getargs4
+;state 0, looking for non-whitespace
+getargs0:     
+        cmp     al,' '  ;space?
+        jz      >g2     ;return if so     
+        cmp     al,tab  ;^I?
+        jz      >g2     ;return if so
+        mov     bx,2    ;state=2, looking for whitespace
+        mov     w[di+2],si ;store pointer in descriptor array
+        dec     w[di+2] ;point back one to include this char
+        mov     w[di],1 ;init count
+        xor     ah,ah   ;assume not quoted arg
+        cmp     al,"'"  ;single quote?
+        je      >g1     ;special treatment if so
+        cmp     al,'"'  ;double quote?
+        je      >g1     ;special treatment if so
+        ret     ;let main loop handle next parse (Z not set)
+g1:     mov     ah,al   ;store quote char so we can match it at end
+        dec     w[di]   ;don't count the quote char itself
+        inc     w[di+2] ;and advance pointer past it
+        mov     bx,4    ;special state
+g2:     or      cx,cx   ;clear Z for when jumped to from whitespace check
+        ret     ;loop (Z not set)
+;state 2, looking for next whitespace
+getargs2:
+        cmp     al,' '  ;space?
+        jz      >g1     ;end of arg if so
+        cmp     al,tab  ;^I?
+        jz      >g1     ;same
+        inc     w[di]   ;else just another char in the string
+        ret     ;Z not set
+g1:     dec     dx      ;any more args expected?        
+        jz      >g2     ;if not, add remainder of command line to this one
+        mov     b[si-1],ch ;null out this part of the string
+        xor     bx,bx   ;state is 0 again
+        add     di,4    ;done with this entry
+        ret     ;loop (Z not set)
+g2:     add     [di],cx ;remainder of count goes here
+        add     si,cx   ;now point past final byte...
+        dec     si      ;back up onto it
+        or      ch,ch   ;so LOOPNZ will fail
+        ret
+;state 4, looking for end quote
+getargs4:
+        cmp     al,ah   ;matching quote char?
+        jz      >g1     ;end of arg if so
+        inc     w[di]   ;else just another char in the string
+        ret
+g1:     mov     b[si-1],ch ;null out this part of the string (end quote)
+        xor     bx,bx   ;state is 0 again
+        add     di,4    ;done with this entry
+        dec     dx      ;any more args expected?        
+        ret     ;if not, Z will be set and LOOPNZ will fall through
+getargs_clear_array:
+        call    saval   ;don't mess up what we already did
+        mov     cx,dx   ;count of string descriptors to clear
+g1:     xor     ax,ax   ;zero out accumulator
+        stosw   ;zero out length word
+        lea     ax,[di-2] ;point to null length
+        stosw   ;store it as null string pointer
+        loop    g1      ;once for each element
+        ret
+

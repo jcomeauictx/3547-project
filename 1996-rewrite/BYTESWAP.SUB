@@ -1,0 +1,34 @@
+;BITSWAP.A86 - Swap bytes in a buffer, e.g.: ABCDE becomes EDCBA.
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       BYTESWAP BUFFER,LENGTH
+;BUFFER is a pointer to the buffer whose bytes are being swapped
+;LENGTH is the 16-bit length of the buffer
+;No errors are returned.
+byteswap macro
+        push    #1,#2
+        call    _byteswap
+        push    offset >m1
+        ret     4
+m1:     #em
+;
+_byteswap:
+lead=di        
+tail=si
+count=cx        
+        call    saval   ;save all registers
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     count,[bx]  ;load count register
+        mov     lead,2[bx] ;buffer address
+        mov     tail,lead ;get end of buffer...
+        add     tail,count ;now just past end
+        dec     tail    ;OK now
+        shr     count,1 ;divide by 2 since we're working from both ends
+b1:     mov     ah,[lead] ;get byte from front of buffer
+        mov     al,[tail] ;now get opposing byte
+        stosb   ;store in front and increment lead pointer
+        mov     [tail],ah ;store tail byte
+        dec     tail    ;must explicitly decrement tail pointer
+        loop    b1      ;on odd count, center byte gets left alone
+        ret

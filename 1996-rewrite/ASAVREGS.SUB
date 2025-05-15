@@ -1,0 +1,49 @@
+saval:
+;Equivalent to the RSX-11M coroutine of the same name.
+;Saves all registers and restores them on return...
+;gives calling routine BP as a frame pointer to stack items
+;Not for use by routines which return values in registers or flags.
+	pushf           ;AX will be stored just above this
+	push    bx,cx,dx,bp,di,si,ds,es
+;don't bother with CS nor SS, if those are changed all is lost!
+	mov     bp,offset >s1 ;"RETURN" address to restore registers
+	push    bp      ;save it
+	mov     bp,sp   ;get stack pointer right here
+	push    20[bp]  ;get caller's return address at top
+	mov     20[bp],ax ;save AX where it was
+	ret     ;to caller, which must issue "RET" to get back here
+;Offsets on return:
+saval_es=2 ;       ES      +2      ;from SP
+saval_ds=4 ;       DS      +4
+saval_si=6 ;       SI      +6
+saval_di=8 ;       DI      +8
+saval_bp=10 ;      BP      +10
+saval_dx=12 ;      DX      +12
+saval_cx=14 ;      CX      +14
+saval_bx=16 ;      BX      +16
+saval_flags=18 ;   Flags   +18
+saval_ax=20 ;      AX      +20
+saval_retaddr=22 ; RetAddr +22     ;return address of caller's caller
+s1:     pop     es,ds,si,di,bp,dx,cx,bx
+	popf
+	pop     ax
+	ret     ;to caller's caller, same as with RSX routine
+;
+savgen:
+;Saves general registers and restores them on return...
+	push    bx,cx,dx,bp
+	mov     bp,offset >s1 ;"RETURN" address to restore registers
+	push    bp      ;save it
+	mov     bp,sp   ;get stack pointer right here
+	push    10[bp]  ;get caller's return address at top
+	mov     10[bp],ax ;save AX where it was
+	ret     ;to caller, which must issue "RET" to get back here
+;Offsets on return:
+savgen_bp=2 ;       BP      +2
+savgen_dx=4 ;       DX      +4
+savgen_cx=6 ;       CX      +6
+savgen_dx=8 ;       BX      +8
+savgen_ax=10 ;      AX      +10
+savgen_retaddr=12 ; RetAddr +12     ;return address of caller's caller
+s1:     pop     bp,dx,cx,bx,ax
+	ret     ;to caller's caller, same as with RSX routine

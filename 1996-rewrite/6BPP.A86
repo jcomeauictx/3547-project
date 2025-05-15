@@ -1,0 +1,56 @@
+;6bpp.a86 - chop low two lsb's from grayscale data so it compresses better
+inhandle dw     stdin
+outhandle dw    stdout
+argv    dw      0,0, 0,0, 0,0
+iosb    dw      0
+main:   getargs 2,#'offset argv'
+        mov     ax,argv ;see if an input filespec was specified
+        call    >s3     ;open it if so
+        errchk  >e5     ;quit if failed
+        mov     ax,argv+4 ;see if an output file was specified
+        call    >s4     ;open if so
+        errchk  >e6     ;quit if failed
+s1:     get     inhandle,#'offset inbuffer',2000,#'offset iosb'
+        mov     cx,iosb ;store count returned in CX
+        errchk  >e1     ;quit on read error
+        errchk  >e2     ;exit if EOF
+        call    sixbpp    ;go chop it
+        put     outhandle,#'offset inbuffer',cx,#'offset iosb' ;send it
+        errchk  >e4     ;quit on write error
+        jmp     s1      ;loop back around
+s3:     or      ax,ax   ;see if anything is there
+        jz      ret     ;just go back if not
+        open    #'offset inhandle',argv+2,'read'
+        ret
+s4:     or      ax,ax   ;check for output filespec
+        jz      ret     ;return if not there
+        open    #'offset outhandle',argv+6,'write'
+        ret
+e1:     jnc     ret     ;now is where we quit on error
+        printf  'Failed on READ of input file\n'
+        exit    1       ;errorlevel 2
+e2:     or      cx,cx   ;was anything returned?
+        jnz     ret     ;continue if so
+        exit    0       ;exit to DOS
+e4:     jnc     ret     ;continue if no error
+        printf  'Failed on WRITE of output file\n'
+        exit    4       ;otherwise quit
+e5:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+2
+        exit    5       ;failure on input file OPEN
+e6:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+6
+        exit    6       ;failure on output file OPEN
+;
+sixbpp:        
+        push    cx      ;save count
+        mov     si,offset inbuffer ;point to input data
+        mov     al,0fch ;all but low two bits
+b1:     and     [si],al ;mask each byte
+        inc     si      ;...
+        loop    b1      ;...
+        pop     cx      ;restore count and return
+        ret
+;
+        buffer  ;init buffer area
+        buffer  inbuffer,2000

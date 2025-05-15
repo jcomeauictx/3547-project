@@ -1,0 +1,55 @@
+;packbits.a86 - squeeze files according to TIFF packbits specification
+inhandle dw     stdin
+outhandle dw    stdout
+eod_marker db   80h
+argv    dw      0,0, 0,0, 0,0
+iosb    dw      0
+main:   getargs 2,#'offset argv'
+        mov     ax,argv ;see if an input filespec was specified
+        call    >s3     ;open it if so
+        errchk  >e5     ;quit if failed
+        mov     ax,argv+4 ;see if an output file was specified
+        call    >s4     ;open if so
+        errchk  >e6     ;quit if failed
+s1:     get     inhandle,#'offset inbuffer',2000,#'offset iosb'
+        mov     cx,iosb ;store count returned in CX
+        errchk  >e1     ;quit on read error
+        errchk  >e2     ;exit if EOF
+        packbits #'offset inbuffer',cx
+        errchk  >e3     ;quit on error
+        put     outhandle,#'offset inbuffer',cx,#'offset iosb' ;send it
+        errchk  >e4     ;quit on write error
+        jmp     s1      ;loop back around
+s3:     or      ax,ax   ;see if anything is there
+        jz      ret     ;just go back if not
+        open    #'offset inhandle',argv+2,'read'
+        ret
+s4:     or      ax,ax   ;check for output filespec
+        jz      ret     ;return if not there
+        open    #'offset outhandle',argv+6,'write'
+        ret
+e1:     jnc     ret     ;now is where we quit on error
+        printf  'Failed on READ of input file\n'
+        exit    1       ;errorlevel 2
+e2:     or      cx,cx   ;was anything returned?
+        jnz     ret     ;continue if so
+        put     outhandle,#'offset eod_marker',1,#'offset iosb' ;send EOD
+        mov     ax,0    ;exit errorlevel
+        adc     ax,0    ;make 1 if WRITE failed
+        shl     ax,1    ;now make it 2 to distinguish from read error
+        exit    ax      ;exit to DOS
+e3:     jnc     ret     ;continue if OK
+        printf  'Failure in PACKBITS routine\n'
+        exit    3
+e4:     jnc     ret     ;continue if no error
+        printf  'Failed on WRITE of output file\n'
+        exit    4       ;otherwise quit
+e5:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+2
+        exit    5       ;failure on input file OPEN
+e6:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+6
+        exit    6       ;failure on output file OPEN
+;
+        buffer  ;init buffer area
+        buffer  inbuffer,2000

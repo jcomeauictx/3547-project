@@ -1,0 +1,108 @@
+;WRITE.A86 - Write subroutine and macro
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       WRITE   HANDLE,BUFFER,LENGTH,IOSB,WRITEBUFFER
+write_handle=8 ; HANDLE is file handle of the opened file.
+write_userbuf=6 ; BUFFER is the pointer to the data record.
+write_length=4 ; LENGTH is the 16-bit size of the record being written 
+        ;-1=ASCIZ, count to null at end
+write_iosb=2 ; IOSB is the address of the I/O status block (16 bits)
+write_buffer=0 ; WRITEBUFFER is a structure as defined in READ.SUB
+write   macro
+        push    #1,#2,#3,#4,#5 ;if you call with offset, use #'offset buffer'
+        call    _write
+        push    offset >m1
+        ret     10       ;clear stack
+m1:     #em
+;
+flush   macro
+        push    #1,#2 ;handle, buffer
+        call    _flush
+        push    offset >m1
+        ret     4
+m1:     #em
+;
+        ret
+_write: and     b[0],0ffh ;clear flags
+        call    saval   ;save all registers
+        call    >w9     ;extract args
+        or      cx,cx   ;anything to do?
+        jz      ret     ;done if not
+        call    >w8     ;count string if ASCIZ
+        mov     [si],cx ;assume success
+w1:     mov     ax,buffer_length[di] ;get total size of buffer
+        sub     ax,buffer_contents[di] ;subtract # bytes already occupied
+        cmp     ax,cx   ;do we have room for the string?
+        jae     >w2     ;copy data and return, if so
+        call    >w3     ;else store as much as we can
+        call    >w9     ;get args again
+        mov     cx,buffer_length[di] ;must be a full buffer at this point
+        mov     dx,buffer_loc[di] ;so point to start
+        mov     bx,write_handle[bx] ;get handle where it belongs
+        mov     ah,40h  ;DOS service
+        int     dos     ;call it...
+        mov     buffer_iosb[di],ax ;store error code in buffer IOSB
+        errchk  >e1     ;trap any error
+        mov     w buffer_contents[di],0 ;empty buffer
+        mov     buffer_pointer[di],buffer_loc[di] ;point to start
+        call    >w9     ;reload registers
+        jmp     w1      ;loop back around and try again
+w2:     mov     si,dx   ;source=user buffer
+        push    di      ;save pointer
+        mov     di,buffer_pointer[di] ;dest=write buffer
+        push    cx      ;save length
+        rep     movsb   ;copy user bytes into write buffer        
+        pop     cx      ;restore length
+        pop     di      ;get pointer back
+        add     buffer_pointer[di],cx ;adjust pointer
+        add     buffer_contents[di],cx ;adjust contents
+        ret
+w3:     ;call with AX=#bytes to copy, others as loaded by W9
+        mov     cx,ax   ;copy count
+        sub     write_length[bx],ax ;adjust count on stack
+        add     write_userbuf[bx],ax ;adjust pointer too
+        mov     si,dx   ;user buffer=source
+        mov     di,buffer_pointer[di] ;dest
+        rep     movsb   ;store the data
+        ret
+w8:     cmp     cx,-1   ;check if we need to count string
+        jne     ret     ;continue if string already counted
+        push    di      ;save struct address
+        mov     di,dx   ;get buffer address into string register
+        xor     al,al   ;searching for null
+        repnz   scasb   ;...
+        pop     di      ;restore struct address
+        jnz     ret     ;zero if null not found
+        not     cx      ;stringlength+1...
+        dec     cx      ;stringlength
+        ret     ;use it
+;
+w9:     lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     cx,write_length[bx] ;length into CX
+        mov     di,write_buffer[bx] ;struct address
+        mov     dx,write_userbuf[bx] ;pointer to user buffer
+        mov     si,write_iosb[bx] ;get I/O status block address
+        ret
+e1:     jnc     ret     ;continue if no error
+        or      w saval_flags[bp],carry ;set carry on return
+        call    w9      ;get args back
+        mov     [si],ax ;copy error into write IOSB
+        pop     ax      ;don't return
+        ret     ;to SAVAL
+;
+_flush: call    saval   ;save registers
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     di,[bx] ;buffer structure
+        mov     bx,2[bx] ;handle
+        mov     cx,buffer_contents[di]
+        mov     dx,buffer_loc[di]
+        mov     ah,40h  ;WRITE service
+        int     dos
+        mov     buffer_iosb[di],ax ;save result code
+        jnc     >f1     ;continue if no error
+        or      w saval_flags[bp],carry ;else set carry on return
+        ret
+f1:     mov     w buffer_contents[di],0 ;zero out contents
+        mov     buffer_pointer[di],buffer_loc[di] ;init pointer
+        ret     ;done

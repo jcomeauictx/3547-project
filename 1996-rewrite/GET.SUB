@@ -1,0 +1,31 @@
+;GET.A86 - Unbuffered read subroutine and macro
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       GET     HANDLE,BUFFER,LENGTH,IOSB
+; HANDLE is file handle of the opened file.
+; BUFFER is the pointer to an area of memory of sufficient size to hold 
+; the record being read.
+; LENGTH is the 16-bit size of the record being read.
+; It is the responsibility of the caller to ascertain that the buffer is of
+; sufficient size to accomodate LENGTH bytes.
+; IOSB is the status word address.
+get     macro
+        push    #1,#2,#3,#4 ;if you call with offset, use #'offset buffer'
+        call    _get
+        push    offset >m1 ;so we can clean up stack without affecting flags
+        ret     8       ;stack is clear
+m1:     #em
+_get:   call    savgen  ;save general registers
+        lea     bx,savgen_retaddr+2[bp] ;get pointer to args
+        mov     cx,2[bx] ;length into CX
+        mov     dx,4[bx] ;buffer address
+        push    [bx]   ;status word address
+        mov     bx,6[bx] ;handle
+        mov     ah,3fh  ;DOS service
+        int     dos     ;call it...
+        pop     bx      ;get status word address
+        mov     [bx],ax ;save count returned or error code
+        jc      ret     ;done if error
+        or      ax,ax   ;else set Z if nothing read
+        ret

@@ -1,0 +1,110 @@
+inhandle dw     stdin
+outhandle dw    stdout
+newdta  db      43 dup (?)
+imagefile db    '*.im?',0
+x_coordinate dw 0
+y_coordinate dw 0
+iosb:   dw      0
+imagewidth dw   ?
+screenwidth dw  640
+imageheight dw  256
+threshold db    90h
+prompt  db      27,'[24HPress any key to advance to next image...$'
+;
+debug=1
+compress=1
+upside_down=1
+;
+main:   mov     bx,offset newdta
+        find    #'offset imagefile',bx
+s1:     call    >e1     ;abort on error
+        mov     dx,dta_filesize+2[bx]
+        mov     ax,dta_filesize[bx]
+        div     imageheight
+        mov     imagewidth,ax
+        lea     bx,dta_filename[bx]
+        open    #'offset inhandle',bx,'read'
+        call    >e1
+        #if upside_down
+        mov     y_coordinate,0
+        #else
+        mov     y_coordinate,imageheight
+        #endif
+        mov     ax,0010h ;set video mode 10
+        int     10h     ;do it
+r_loop: read    inhandle,inbuffer,imagewidth,iosb
+        jc      ret
+        jz      >r2
+        call    showline
+        jmp     r_loop
+        ret     ;exit
+r2:     mov     dx,offset prompt
+        mov     ah,9    ;DOS screen print service
+        int     dos
+        mov     ah,7    ;get key
+        int     dos
+        mov     ax,7    ;mode 7
+        int     10h     ;reset screen
+        mov     bx,offset newdta ;use same DTA
+        find    0,bx     ;get next file
+        jmp     s1      ;loop to process it
+e1:     jnc     ret
+        mov     ax,4c00h
+        int     dos
+        ret
+showline: mov   si,offset inbuffer
+        mov     cx,screenwidth ;assume filling screen
+        mov     bx,imagewidth ;compare...
+        #if compress ;but if compressing horizontally, squeeze
+        shr     bx,1
+        #endif
+        cmp     bx,cx   ;is image wider than screen?
+        jnc     >s1     ;OK if so
+        mov     cx,bx   ;else use shorter width
+s1:     mov     x_coordinate,0
+        #if upside_down
+         #if !byteswap
+        byteswap si,cx
+         #else
+        shl     cx,1 ;undo our earlier division
+        byteswap si,cx
+        shr     cx,1
+         #endif
+        #endif
+s_loop: lodsb
+        #if compress ;combine two pixels horizontally
+        mov     ah,al ;so store the one we just got
+        lodsb   ;get another
+        shr     al,1  ;divide both by 2 for average
+        shr     ah,1
+        add     al,ah
+        #endif
+        #if singlebit
+        sub     al,threshold ;make single bit-per-pixel
+        jc      >s1     ;skip if it was lower (black)
+        mov     al,3    ;otherwise it was white
+        jmp     >s2
+        #else
+        shr     al,6    ;make a number from 0 to 3
+        mov     bx,>s0  ;point to translation table
+        xlat    ;make color value
+        jmp     >s2     ;use value from table
+s0:     db      4,6,7,15 ;black, gray, light gray, white
+        #endif
+s1:     xor     al,al   ;black
+s2:     mov     bh,0
+        mov     dx,y_coordinate
+        push    cx      ;save loop count
+        mov     cx,x_coordinate
+        mov     ah,0ch  ;write pixel
+        int     10h     ;call on BIOS
+        pop     cx      ;restore loop count
+        inc     x_coordinate
+        loop    s_loop
+        #if upside_down
+        inc     y_coordinate
+        #else
+        dec     y_coordinate
+        #endif
+        ret
+inbuffer: end

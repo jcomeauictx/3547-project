@@ -1,0 +1,202 @@
+;SPRINTF.A86 - "C" sprintf partial implementation
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       SPRINTF OUTBUFFER,CONTROLSTRING,ARG1,ARG2,...ARGn
+; OUTBUFFER is the pointer to memory allocated for the string output
+;  No check is made for buffer overflow, could be disastrous!
+; CONTROLSTRING is a string literal with codes for print formatting
+; ARG1, 2, ...n represent the values for use with the format codes
+sprintf macro
+        #qxl3   ;push final arg first
+        push    #x
+        #eq
+        push    offset >m0 ;control string address
+        push    #1      ;buffer address
+        call    _sprintf
+        push    offset >m1
+        ret     #nl*2   ;clear stack
+m0:     db      #2,0
+m1:     #em
+;
+;Note: had to change local labels to Pn because of conflicting call to
+; PUT macro inside these macros
+fprintf macro ;fn,controlstring,args
+        push    offset >p1 ;simulate subroutine call to SAVAL
+        call    saval   ;all regs on stack, sp into bp
+;note: if BP used as arg, will not work right!
+        sub     sp,1000 ;make string buffer on stack
+        mov     bp,sp   ;copy into regular register
+        #qxl3   ;push final arg first
+        push    #x
+        #eq
+        push    offset >p0 ;control string address
+        push    bp      ;buffer address
+        call    _sprintf
+        put     #1,bp,asciz,bp
+        add     bp,1000 ;restore BP before SP
+        mov     sp,bp
+        ret
+p0:     db      #2,0
+p1:     #em
+;
+printf macro ;controlstring,args
+        push    offset >p1 ;so we "return" past this macro
+        call    saval   ;all regs on stack, sp into bp
+;note: if BP used as arg, will not work right!
+        sub     sp,1000 ;make string buffer on stack
+        mov     bp,sp
+        #qxl2   ;push final arg first
+        push    #x
+        #eq
+        push    offset >p0 ;control string address
+        push    bp      ;buffer address
+        call    _sprintf
+        put     stdout,bp,asciz,bp
+        add     bp,1000
+        mov     sp,bp
+        ret
+p0:     db      #1,0
+p1:     #em
+;
+dbgmsg  macro ;controlstring,args - PRINTF only when debugging
+        ##if debug
+        push    offset >p1 ;so we "return" past this macro
+        call    saval   ;all regs on stack, sp into bp
+;note: if BP used as arg, will not work right!
+        sub     sp,1000 ;make string buffer on stack
+        mov     bp,sp
+        #qxl2   ;push final arg first
+        push    #x
+        #eq
+        push    offset >p0 ;control string address
+        push    bp      ;buffer address
+        call    _sprintf
+        put     stdout,bp,asciz,bp
+        add     bp,1000
+        mov     sp,bp
+        ret
+p0:     db      #1,0
+p1:     ##endif
+        #em
+;
+_sprintf: call    saval  ;save all registers
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     di,[bx] ;output buffer address
+        mov     si,2[bx] ;point to control string
+        add     bx,4    ;update pointer to first arg
+s1:     lodsb   ;get next byte of control string
+        cmp     al,'%'  ;is it a variable format code?
+        call    >v1     ;process it if so
+        cmp     al,'\'  ;fixed format code?
+        call    >f1     ;process it if so
+s2:     stosb   ;if none of above, store the byte in output buffer
+        or      al,al   ;end of control string?
+        jnz     s1      ;loop if not
+        ret
+v1:     jne     ret     ;continue if not '%'
+        pop     ax      ;discard
+        lodsb   ;get next byte
+        cmp     al,'d'  ;decimal?
+        call    >v3
+        cmp     al,'s'  ;string?
+        call    >v5
+        cmp     al,'x'  ;hex?
+        call    >v7
+        jmp     s2      ;if none, just store the byte in output
+v3:     jne     ret     ;continue if not decimal
+        pop     ax      ;don't return
+        mov     ax,[bx] ;get next arg from stack
+        add     bx,2    ;point to following arg
+        call    >d1     ;output as decimal ASCII
+        jmp     s1      ;loop back to start instead
+v5:     jne     ret     ;continue if not string
+        add     bx,2    ;point to following arg
+        call    saval   ;save registers
+        mov     saval_retaddr[bp],offset s1 ;return to top of loop
+        mov     di,[bx-2] ;get string address from stack
+        xor     al,al   ;search for trailing null
+        mov     cx,100h ;allow 256 bytes max
+        repnz   scasb   ;do the search
+        jnz     ret     ;skip if not found
+        not     cl      ;make CX the count of bytes excluding null
+        mov     si,[bx-2] ;get start of string
+        mov     di,saval_di[bp] ;restore DI to output buffer
+        rep     movsb   ;store the string
+        mov     saval_di[bp],di ;update on return
+        ret     ;done
+v7:     jne     ret     ;continue if not hex
+        pop     ax      ;don't return
+        mov     ax,[bx] ;get next arg from stack
+        add     bx,2    ;point to following arg
+        call    >x1     ;output as hexadecimal ASCII
+        jmp     s1      ;loop back around
+f1:     jne     ret     ;continue if not '\'
+        pop     ax      ;else discard
+        lodsb   ;get following byte
+        cmp     al,'t'  ;tab?
+        jne     >f2     ;skip if not
+        mov     al,9    ;else output HT char
+        stosb   ;done
+        jmp     s1      ;back to top
+f2:     cmp     al,'e'  ;escape char?
+        jne     >f3     ;skip if not
+        mov     al,27   ;else do it
+        stosb   ;done
+        jmp     s1      ;a capo
+f3:     cmp     al,'n'  ;newline?
+        jne     >f9     ;if not, just store it and loop
+crlf=10 by 13 ;carriage return/linefeed        
+        mov     ax,crlf ;store DOS newline
+        stosw   ;done
+        jmp     s1      ;to top
+f9:     jmp     s2      ;store it and loop
+d1:     call    saval   ;save regs again
+        or      ax,ax   ;see if 0
+        call    >d7     ;easier if so
+        mov     bx,offset >d9 ;point to table
+        mov     si,0fh   ;for zero suppression
+d2:     test    w[bx]    ;done?
+        mov     saval_di[bp],di ;save pointer just in case
+        jz      ret     ;return if so
+        xor     cx,cx   ;clear count
+d3:     sub     ax,[bx] ;next digit
+        inc     cx      ;up the count
+        jnc     d3      ;loop till goes under
+        add     ax,[bx] ;then restore to positive
+        add     bx,2    ;point to following digit
+        add     cl,'0'-1 ;make ASCII
+        and     cx,si   ;mask out leading zeroes
+        jz      d2      ;loop if nothing yet to store
+        or      cx,'0'  ;put the bits back
+        or      si,cx   ;and update mask for next time
+        mov     [di],cl ;store the decimal digit
+        inc     di      ;update output pointer
+        jmp     d2      ;loop back around
+d7:     jne     ret     ;regular routine if nonzero
+        mov     b[di],'0' ;else store ASCII zero
+        inc     w saval_di[bp] ;update end pointer
+        pop     ax      ;don't continue
+        ret     ;restoring registers
+d9:     dw      10000,1000,100,10,1,0
+x1:     call    savgen  ;save general registers
+        mov     bx,offset >x9 ;point to translation table
+        mov     dx,ax   ;copy binary word
+        xchg    ah,al   ;output high byte first
+        aam     16      ;split into nybbles
+        xchg    ah,al   ;again, high first
+        xlat    ;get hex digit
+        stosb   ;store in output
+        mov     al,ah   ;now low nybble
+        xlat    ;same again
+        stosb   ;...
+        mov     ax,dx   ;get original back
+        aam     16      ;now do the low byte
+        xchg    ah,al   ;again, high first
+        xlat    ;get hex digit
+        stosb   ;store in output
+        mov     al,ah   ;now low nybble
+        xlat    ;same again
+        stosb   ;...
+        ret
+x9:     db      '0123456789ABCDEF'

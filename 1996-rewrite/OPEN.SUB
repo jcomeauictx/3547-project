@@ -1,0 +1,56 @@
+;OPEN.A86 - Open file subroutine and macro
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       OPEN    HANDLE,FILESPEC,ACCESS
+; HANDLE is a pointer to word storage for the handle of the opened file.
+;  The error code will be found here if the carry flag is set.
+; FILESPEC is a pointer to the ASCIZ file specification
+; ACCESS is READ or WRITE
+open    macro
+        push    #1,#2   ;if you call with offset, use #'offset filespec'
+        ##if #s3
+         ##if #3 = 'read'
+        push    0       ;read-only access
+         ##elseif #3 = 'write'
+        push    1       ;remember, direct pushes only work on 286 or better!
+         ##else
+        push    2       ;default is read+write
+         ##endif
+        ##endif
+        call    _open
+        push    offset >m1
+        ret     6       ;clear stack
+m1:
+        #em
+_open:  call    savgen  ;save general registers
+        lea     bx,savgen_retaddr+2[bp] ;get pointer to args
+        mov     al,[bx] ;access code into AL
+        mov     dx,2[bx] ;buffer address
+        mov     bx,4[bx] ;handle address
+        mov     ah,3dh  ;DOS service
+        mov     cl,al   ;copy access code for afterwards
+        int     dos     ;call it...
+        errchk  >e1     ;if failed and write, try CREATE instead
+        mov     [bx],ax ;save handle returned or error code
+        errchk  >e2     ;if failed CREATE, quit
+        mov     bx,ax   ;now get handle for seek
+        mov     al,cl   ;get access code back
+        shl     al,1    ;0=0, offset from start; 1=2, offset from end
+        jz      ret     ;don't bother if reading
+        xor     cx,cx   ;clear CX:DX
+        mov     dx,cx
+        mov     ah,42h  ;Move File Pointer service
+        int     dos
+        or      ax,ax   ;ignore any error
+        ret
+e1:     jnc     ret     ;continue if successful
+        cmp     cl,1    ;was it READ access desired?
+        jc      ret     ;quit if so
+        mov     ah,3ch  ;else use CREATE service
+        xor     cx,cx   ;zero out the attributes
+        int     dos     ;try to create it
+        ret
+e2:     jnc     ret     ;continue if no carry
+        pop     ax      ;else quit
+        ret

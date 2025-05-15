@@ -1,0 +1,35 @@
+%! Non-conforming PostScript
+% template for 2-per-page Form 3547s
+/debug false def % for setting path and performing showpage during development
+/inch {72 mul} bind def
+/DownArrow {gsave /ZapfDingbats 20 selectfont -7 14 rmoveto
+ -90 rotate (á) show grestore} bind def % ascii 225 is down arrow
+debug {0 0 moveto} if % path assumed at bottom left of template area
+% first show fee notice
+gsave
+ /Helvetica-Bold 20 selectfont
+ 7 inch .4 inch rmoveto -180 rotate
+ DownArrow (  return to sender  ) show DownArrow
+ (       fee due 50¢) show % ascii 162 is cent sign
+grestore
+% then the G-10 label
+gsave
+ /Helvetica 9 selectfont
+ .2 inch .2 inch rmoveto gsave
+  1.3 inch 0 rlineto 0 .75 inch rlineto -1.3 inch 0 rlineto closepath
+  gsave 1 setgray fill grestore % erase whatever's under the box
+  stroke % outline the box
+ grestore 1.24 inch .2 inch rmoveto -180 rotate
+ gsave (First-Class Mail) show grestore
+ 0 -.15 inch rmoveto gsave (Postage & Fees Paid) show grestore
+ 0 -.15 inch rmoveto gsave (USPS) show grestore
+ 0 -.15 inch rmoveto gsave (Permit No. G-10) show grestore
+grestore
+% Now place the 3547 identifier along the edge
+gsave
+ /Helvetica 12 selectfont
+ 8.1 inch 3.75 inch rmoveto -90 rotate
+  gsave (U.S. POSTAL SERVICE) show grestore
+  .3 inch -.2 inch rmoveto (PS FORM 3547) show
+grestore
+debug {showpage} if

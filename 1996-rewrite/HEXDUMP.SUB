@@ -1,0 +1,35 @@
+;HEXDUMP.A86 - Convert bytes to hex representation
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       HEXDUMP  BUFFER,LENGTH,OUTBUFFER
+; BUFFER is the pointer to the byte data
+; LENGTH is the number of bytes to convert
+; OUTBUFFER is the pointer to the conversion space
+;On return, the LENGTH parameter is updated
+hexdump macro
+        push    #1,#2,#3
+        call    _hexdump
+        add     sp,2
+        pop     #2      ;only restore the (updated) length arg
+        add     sp,2
+        #em
+_hexdump: call  saval ;save registers, no error checking done
+        lea     bx,saval_retaddr+2[bp] ;get pointer to args
+        mov     di,[bx] ;output buffer address
+        mov     cx,[bx+2] ;count of bytes to convert
+        shl     w[bx+2],1 ;update the count now
+        mov     si,[bx+4] ;pointer to source buffer
+        jcxz    >h7     ;exit if nothing to do
+        mov     bx,offset >h9 ;point to conversion table
+h1:     lodsb   ;get next byte from source buffer
+        aam     16      ;split into nybbles
+        xchg    ah,al   ;output high nybble first
+        xlat    ;first convert to HEX digit
+        stosb   ;to output buffer
+        xchg    ah,al   ;get low nybble back
+        xlat    ;convert it too
+        stosb   ;...
+        loop    h1      ;until done
+h7:     ret
+h9:     db      '0123456789ABCDEF'

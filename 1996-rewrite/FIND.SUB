@@ -1,0 +1,63 @@
+;FIND.SUB - Findfirst function
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       FIND    FILESPEC,DTA,ATTRIBUTES
+; FILESPEC is a pointer to the ASCIZ file specification (with wildcards)
+; DTA is the address of a 43-byte (at least) area of memory used by DOS
+dta_attribute=15h
+dta_timestamp=16h
+dta_datestamp=18h
+dta_filesize=1ah ;dword pointer
+dta_filename=1eh ;13 byte ASCIZ string, no dev nor dir
+; ATTRIBUTES is a string of the chars S "system", H "hidden", D "directory",
+;  and/or V "volume label".
+attribute_readonly=bit 0
+attribute_hidden=bit 1
+attribute_system=bit 2
+attribute_volume_label=bit 3
+attribute_subdirectory=bit 4
+attribute_archive=bit 5
+;If a file is not found, its information can be found at the specified offsets.
+;Otherwise the dta_attribute field will have the value 2 (find_err_fnf),
+; 3 (find_err_pnf), or 12h (find_err_nmf), and the carry flag will be set.
+find    macro
+        ##if #s1
+        push    #1
+        ##else
+        push    0
+        ##endif
+        push    #2   ;if you call with offset, use #'offset dta'
+__tmp=0
+        #cx3
+        ##if '#x' = 's'
+        __tmp=tmp OR attribute_system
+        ##elseif '#x' = 'h'
+        __tmp=tmp OR attribute_hidden
+        ##elseif '#x' = 'd'
+        __tmp=tmp OR attribute_subdirectory
+        ##elseif '#x' = 'v'
+        __tmp=tmp OR attribute_volume_label
+        ##endif
+        #ec
+        push    __tmp
+        call    _find
+        push    offset >m1
+        ret     6       ;clear stack
+m1:     #em
+_find:  call    savgen  ;save general registers
+        lea     bx,savgen_retaddr+2[bp] ;get pointer to args
+        mov     cx,[bx] ;get attributes
+        mov     dx,2[bx] ;DTA address
+        mov     ah,1ah  ;set DTA service
+        int     dos     ;no error check here
+        push    dx      ;need DTA later
+        mov     dx,4[bx] ;filespec pointer if first call, null otherwise
+        pop     bx      ;save DTA here
+        mov     ah,4eh  ;DOS service
+        cmp     dx,1    ;will set carry if lower (0)
+        adc     ah,0    ;make the call to NEXTFILE if that's the case
+        int     dos     ;call it...
+        jnc     ret     ;return if no problem
+        mov     b dta_attribute[bx],al ;save error code in attribute field
+        ret

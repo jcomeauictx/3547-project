@@ -1,0 +1,34 @@
+;BITSWAP.A86 - Swap bits in a byte, e.g. 11000000 becomes 00000011.
+; For use with a header file which contains a JMP MAIN, where MAIN is the
+; entry label for any program using this routine.
+;Calling convention:
+;       BITSWAP BYTE
+;BYTE is a byte pointer or register, not a constant
+bitswap macro
+        push    #1
+        call    _bitswap
+        pop     #1
+        #em
+make_bitswap_table macro        
+        #rx1(64) ;64 byte values in ascending order
+        __tmp=0
+        #ry1(8) ;loop through bit values
+        ##if (#nx+#1-1) and bit (#ny-1)
+        __tmp=__tmp or bit (8-#ny)
+        ##endif
+        #er 
+        db      __tmp
+        #er #em
+_bitswap:
+        call    savgen  ;save general registers
+        lea     bx,savgen_retaddr+2[bp] ;get pointer to args
+        mov     al,b[bx] ;get byte to swap
+        mov     bx,bitswap_table
+        xlat
+        mov     b[bx],al ;store it back on stack
+        ret
+bitswap_table:
+        make_bitswap_table 0
+        make_bitswap_table 64
+        make_bitswap_table 128
+        make_bitswap_table 192

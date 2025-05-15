@@ -1,0 +1,12 @@
+;AAAFIRST.SUB ;the A's make A86 compile it first, so it skips subroutines        
+dos     equ     21h        
+tab     equ     9       ;^I
+stdin   equ     0
+stdout  equ     1
+stderr  equ     2
+stdprn  equ     4
+carry   equ     1        
+zflag   equ     40h        
+errchk  macro   call #1 #em        
+asciz   equ     -1      ;for special handling of uncounted ASCIZ strings        
+        jmp     main   ;make main program label always MAIN!

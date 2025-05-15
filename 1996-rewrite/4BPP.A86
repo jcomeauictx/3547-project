@@ -1,0 +1,71 @@
+;4bpp.a86 - reduce 8bpp WABCR images to 4bpp so they compress better
+inhandle dw     stdin
+outhandle dw    stdout
+argv    dw      0,0, 0,0, 0,0
+iosb    dw      0
+linelength dw   0       ;store length here
+divisor dw      256     ;constant image height, divide size by this for length
+dta     db      43 dup (?)
+main:   getargs 2,#'offset argv'
+        mov     ax,argv ;see if an input filespec was specified
+        call    >s3     ;open it if so
+        errchk  >e5     ;quit if failed
+        mov     ax,argv+4 ;see if an output file was specified
+        call    >s4     ;open if so
+        errchk  >e6     ;quit if failed
+s1:     get     inhandle,#'offset inbuffer',linelength,#'offset iosb'
+        mov     cx,iosb ;store count returned in CX
+        errchk  >e1     ;quit on read error
+        errchk  >e2     ;exit if EOF
+        call    fourbpp ;go chop it
+        put     outhandle,#'offset inbuffer',cx,#'offset iosb' ;send it
+        errchk  >e4     ;quit on write error
+        jmp     s1      ;loop back around
+s3:     or      ax,ax   ;see if anything is there
+        jz      ret     ;just go back if not
+        find    argv+2,#'offset dta' ;do a FINDFILE just to get the size
+        jc      ret     ;quit on error
+        mov     dx,w dta+dta_filesize+2 ;get the size in DX:AX
+        mov     ax,w dta+dta_filesize
+        div     w divisor ;get line length
+        mov     linelength,ax   ;quotient is length
+        open    #'offset inhandle',argv+2,'read'
+        ret
+s4:     or      ax,ax   ;check for output filespec
+        jz      ret     ;return if not there
+        open    #'offset outhandle',argv+6,'write'
+        ret
+e1:     jnc     ret     ;now is where we quit on error
+        printf  'Failed on READ of input file\n'
+        exit    1       ;errorlevel 2
+e2:     or      cx,cx   ;was anything returned?
+        jnz     ret     ;continue if so
+        exit    0       ;exit to DOS
+e4:     jnc     ret     ;continue if no error
+        printf  'Failed on WRITE of output file\n'
+        exit    4       ;otherwise quit
+e5:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+2
+        exit    5       ;failure on input file OPEN
+e6:     jnc     ret     ;continue if no error
+        printf  'Failed on OPEN of %s\n',argv+6
+        exit    6       ;failure on output file OPEN
+;
+fourbpp:        
+        shr     cx,1    ;divide by 2...
+        adc     cx,0    ;one more if line length was odd
+        push    cx      ;save updated count
+        mov     si,offset inbuffer ;point to input data
+        mov     di,si   ;use same buffer to store it
+f1:     lodsb   ;grab a byte
+        aam     16      ;split into nybbles, leaving high one in AH
+        lodsb   ;get next one, possibly garbage if odd line length
+        shr     al,4    ;move high nybble into low     
+        aad     16      ;put the nybbles back together
+        stosb   ;overwrite input with output
+        loop    f1      ;...
+        pop     cx      ;restore count and return
+        ret
+;
+        buffer  ;init buffer area
+        buffer  inbuffer,2000
